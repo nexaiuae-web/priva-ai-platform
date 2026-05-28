@@ -1,0 +1,49 @@
+### ============================================
+### 1️⃣ رفع صورة (Multipart Form-Data)
+### ============================================
+POST http://localhost:3005/api/upload
+x-master-key: 8MCfyn40H86bDMaLKbn_tSf30ImD9CiK
+x-company-id: cmp_01260b8bc6e6
+Content-Type: multipart/form-data; boundary=----PrivaFormBoundary
+
+------PrivaFormBoundary
+Content-Disposition: form-data; name="file"; filename="ajman-championship.png"
+Content-Type: image/png
+
+<< ./ajman-championship.png
+------PrivaFormBoundary--
+
+
+### ============================================
+### 2️⃣ الدردشة (بعد الرفع بنجاح)
+### ============================================
+POST http://localhost:3005/api/chat
+x-master-key: 8MCfyn40H86bDMaLKbn_tSf30ImD9CiK
+x-company-id: cmp_01260b8bc6e6
+Content-Type: application/json
+
+{
+  "question": "من هم الرعاة في بطولة عجمان؟",
+  "top_k": 5
+}
+
+
+### ============================================
+### 3️⃣ إضافة شركة جديدة (اختياري)
+### ============================================
+POST http://localhost:3005/api/admin/add-company
+x-master-key: 8MCfyn40H86bDMaLKbn_tSf30ImD9CiK
+Content-Type: application/json
+
+{
+  "name": "شركة تجريبية",
+  "ai_provider": "qwen",
+  "external_api_key": "dummy-key-for-local-ollama"
+}
+
+
+### ============================================
+### 4️⃣ قائمة الشركات
+### ============================================
+GET http://localhost:3005/api/admin/companies
+x-master-key: 8MCfyn40H86bDMaLKbn_tSf30ImD9CiK

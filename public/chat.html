@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PRIVA-AI — Chat</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              brand: {
+                50: "#eff6ff",
+                100: "#dbeafe",
+                500: "#3b82f6",
+                600: "#2563eb",
+                700: "#1d4ed8",
+                900: "#1e3a8a",
+              },
+            },
+            fontFamily: {
+              sans: ["Inter", "system-ui", "Segoe UI", "sans-serif"],
+            },
+          },
+        },
+      };
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body class="h-full bg-slate-100 text-slate-900 antialiased">
+    <div class="flex h-full min-h-0">
+      <!-- Sidebar -->
+      <aside
+        class="flex w-72 shrink-0 flex-col border-r border-slate-200 bg-white shadow-sm"
+        aria-label="Chat history"
+      >
+        <div class="border-b border-slate-200 p-4">
+          <div class="flex items-center gap-2">
+            <div
+              class="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-600 text-sm font-bold text-white"
+            >
+              P
+            </div>
+            <div>
+              <p class="text-sm font-semibold text-slate-900">PRIVA-AI</p>
+              <p class="text-xs text-slate-500">Contract RAG</p>
+            </div>
+          </div>
+          <button
+            id="btn-new-chat"
+            type="button"
+            class="mt-4 w-full rounded-lg bg-brand-600 px-3 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2"
+          >
+            New chat
+          </button>
+        </div>
+
+        <div class="border-b border-slate-200 p-4 space-y-3">
+          <p class="text-xs font-semibold uppercase tracking-wide text-slate-400">Connection</p>
+          <label class="block">
+            <span class="text-xs font-medium text-slate-600">x-master-key</span>
+            <input
+              id="input-master-key"
+              type="password"
+              autocomplete="off"
+              class="mt-1 w-full rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs text-slate-900 placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+              placeholder="From .env (dev only)"
+            />
+          </label>
+          <label class="block">
+            <span class="text-xs font-medium text-slate-600">x-company-id</span>
+            <input
+              id="input-company-id"
+              type="text"
+              class="mt-1 w-full rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs text-slate-900 placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+              placeholder="cmp_…"
+            />
+          </label>
+          <p class="text-[10px] leading-relaxed text-slate-400">
+            Keys are stored in this browser only (localStorage). Use a dev key; do not ship production secrets in the UI.
+          </p>
+        </div>
+
+        <nav id="sidebar-chats" class="min-h-0 flex-1 overflow-y-auto p-2"></nav>
+
+        <div class="shrink-0 border-t border-slate-200 p-4" id="knowledge-section">
+          <h3 class="mb-2 flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+            📚 إدارة المعرفة
+          </h3>
+          <button
+            id="uploadKnowledgeBtn"
+            type="button"
+            class="mb-2 flex w-full items-center justify-center gap-1 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-medium text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            ⬆️ رفع مستند جديد
+          </button>
+          <div
+            id="upload-progress-wrap"
+            class="mb-3 hidden rounded-lg border border-emerald-200 bg-emerald-50/90 p-3 shadow-sm transition-opacity duration-300"
+            role="status" aria-live="polite" aria-hidden="true"
+          >
+            <div class="mb-2 flex items-center justify-between gap-2">
+              <span id="upload-progress-phase" class="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-800">Uploading</span>
+              <span id="upload-progress-pct" class="text-sm font-bold tabular-nums text-emerald-700">0%</span>
+            </div>
+            <p id="upload-progress-label" class="mb-2 text-xs leading-snug text-slate-700">Preparing upload…</p>
+            <div class="h-2.5 overflow-hidden rounded-full bg-emerald-100 ring-1 ring-emerald-200/60">
+              <div id="upload-progress-bar" class="h-full w-0 rounded-full bg-gradient-to-r from-emerald-500 to-emerald-600 transition-[width] duration-300 ease-out"></div>
+            </div>
+            <p id="upload-progress-detail" class="mt-1.5 text-[10px] text-slate-500"></p>
+          </div>
+          <input
+            type="file"
+            id="knowledgeFileInput"
+            accept=".pdf,.png,.jpg,.jpeg,.doc,.docx"
+            multiple
+            class="hidden"
+          />
+          <div id="knowledgeList" class="max-h-48 space-y-1 overflow-y-auto text-xs">
+            <p class="text-center text-slate-400">جاري تحميل الملفات…</p>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Main -->
+      <main class="flex min-w-0 flex-1 flex-col bg-slate-50">
+        <header
+          class="flex shrink-0 items-center justify-between border-b border-slate-200 bg-white px-6 py-3 shadow-sm"
+        >
+          <div>
+            <h1 id="chat-title" class="text-lg font-semibold text-slate-900">New conversation</h1>
+            <p class="text-xs text-slate-500">Streaming · /api/chat</p>
+          </div>
+          <span
+            id="status-badge"
+            class="hidden rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-emerald-600/20"
+            >Ready</span
+          >
+        </header>
+
+        <div id="messages-scroll" class="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-8">
+          <div id="messages-list" class="mx-auto flex max-w-3xl flex-col gap-4"></div>
+        </div>
+
+        <!-- Sources (from SSE `sources` event) -->
+        <section
+          id="sources-panel"
+          class="hidden shrink-0 border-t border-slate-200 bg-white px-4 py-3 sm:px-8"
+          aria-live="polite"
+        >
+          <div class="mx-auto max-w-3xl">
+            <h2 class="text-xs font-semibold uppercase tracking-wide text-brand-700">Sources</h2>
+            <ul id="sources-list" class="mt-2 space-y-2 text-sm text-slate-700"></ul>
+          </div>
+        </section>
+
+        <footer class="shrink-0 border-t border-slate-200 bg-white p-4 shadow-[0_-4px_12px_rgba(15,23,42,0.06)] sm:px-8">
+          <div class="mx-auto flex max-w-3xl gap-2">
+            <textarea
+              id="input-message"
+              rows="2"
+              class="min-h-[44px] flex-1 resize-none rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+              placeholder="Ask a question about your indexed documents…"
+            ></textarea>
+            <button
+              id="btn-send"
+              type="button"
+              class="shrink-0 self-end rounded-xl bg-brand-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Send
+            </button>
+          </div>
+        </footer>
+      </main>
+    </div>
+
+    <div
+      id="toast"
+      class="pointer-events-none fixed bottom-6 left-1/2 z-50 hidden -translate-x-1/2 rounded-lg bg-slate-900 px-4 py-2 text-sm text-white shadow-lg"
+      role="status"
+    ></div>
+
+    <script src="/chat.js"></script>
+  </body>
+</html>

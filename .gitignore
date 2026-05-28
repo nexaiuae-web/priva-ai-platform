@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Secrets & local env
+.env
+.env.*
+!.env.example
+
+# Local databases & legacy JSON (use MongoDB Atlas in production)
+data/tenants.db
+data/tenants.db-*
+data/db.json
+data/atlas-import/
+
+# Vector store (Chroma local persist — not used on Render when VECTOR_STORE=mongo)
+chroma_data/
+
+# Ephemeral upload staging & face reference images
+data/upload_staging/
+data/face_profiles/
+
+# Logs & OS
+*.log
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Frontend (deploy API only; host UI separately or on static host)
+priva-ai-workspace-main/**/node_modules/
+priva-ai-workspace-main/**/dist/

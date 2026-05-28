@@ -1,0 +1,21 @@
+# Render Blueprint — Web Service for PRIVA-AI API
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: priva-ai-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: RENDER
+        value: "true"
+      - key: VECTOR_STORE
+        value: mongo
+      - key: TENANT_STORE
+        value: mongo
+      # Set in Render dashboard (never commit secrets):
+      # MONGODB_URI, JWT_SECRET, OPENAI_API_KEY, OLLAMA_URL, CORS_ORIGIN, etc.
