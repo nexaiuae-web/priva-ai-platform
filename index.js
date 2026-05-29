@@ -908,7 +908,7 @@ adminRouter.post("/add-company", requireMasterKey, async (req, res, next) => {
   }
 });
 
-adminRouter.get("/companies", requireAuth, requireAdmin, async (req, res, next) => {
+adminRouter.get("/companies", requireAuth, requireAdmin, async (req, res) => {
   try {
     console.log(
       "[ADMIN] GET /companies | user:",
@@ -916,8 +916,10 @@ adminRouter.get("/companies", requireAuth, requireAdmin, async (req, res, next) 
       "| role:",
       req.auth?.user?.role
     );
-    const companies = await enrichCompaniesWithStoragePool(listCompaniesWithStats());
-    const metrics = getTenantMetrics();
+    const companies = await enrichCompaniesWithStoragePool(
+      await Promise.resolve(listCompaniesWithStats())
+    );
+    const metrics = await Promise.resolve(getTenantMetrics());
     const total_storage_used_mb = companies.reduce(
       (sum, company) => sum + Number(company.storage_used_mb || 0),
       0
@@ -931,7 +933,8 @@ adminRouter.get("/companies", requireAuth, requireAdmin, async (req, res, next) 
       },
     });
   } catch (error) {
-    return next(error);
+    console.error("[ADMIN] GET /companies error:", error);
+    return res.status(500).json({ error: error?.message || String(error) });
   }
 });
 
@@ -1020,10 +1023,11 @@ async function updateCompanyHandler(req, res, next) {
 adminRouter.patch("/companies/:id", requireAuth, requireAdmin, updateCompanyHandler);
 adminRouter.put("/companies/:id", requireAuth, requireAdmin, updateCompanyHandler);
 
-adminRouter.get("/users", requireAuth, requireAdmin, async (_req, res, next) => {
+adminRouter.get("/users", requireAuth, requireAdmin, async (_req, res) => {
   try {
+    const userRows = await Promise.resolve(listUsersForAdmin());
     const users = await Promise.all(
-      listUsersForAdmin().map(async (user) => {
+      userRows.map(async (user) => {
         const profile = getFaceProfile(user.id);
         const referenceCount = getFaceReferenceCount(user.id);
         const storageSnapshot = await getUserStorageSnapshot(user.id);
@@ -1042,7 +1046,8 @@ adminRouter.get("/users", requireAuth, requireAdmin, async (_req, res, next) => 
     );
     return res.json({ users });
   } catch (error) {
-    return next(error);
+    console.error("[ADMIN] GET /users error:", error);
+    return res.status(500).json({ error: error?.message || String(error) });
   }
 });
 
