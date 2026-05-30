@@ -230,7 +230,14 @@ async function updateCompanyLimits(companyId, { storage_limit_mb }) {
 }
 
 async function deleteUserById(userId) {
-  const result = await User.deleteOne({ id: String(userId || "").trim() });
+  const id = String(userId || "").trim();
+  try {
+    const UserFaceProfile = require("../models/UserFaceProfile");
+    await UserFaceProfile.deleteOne({ user_id: id });
+  } catch {
+    /* face profile collection may be unavailable */
+  }
+  const result = await User.deleteOne({ id });
   return result.deletedCount > 0;
 }
 

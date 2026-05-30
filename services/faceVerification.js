@@ -5,7 +5,11 @@ const { createCanvas, Canvas, Image, ImageData } = require("@napi-rs/canvas");
 const tf = require("@tensorflow/tfjs");
 require("@tensorflow/tfjs-backend-wasm");
 const faceapi = require("@vladmandic/face-api/dist/face-api.node-wasm.js");
-const { getDb } = require("./tenantDb");
+const {
+  loadFaceProfileRow,
+  upsertFaceProfileRow,
+  deleteFaceProfileRow,
+} = require("./faceProfileStore");
 
 const MODEL_DIR = path.join(
   __dirname,
@@ -106,78 +110,6 @@ function ensureFaceProfilesDir() {
   fs.mkdirSync(FACE_PROFILES_DIR, { recursive: true });
 }
 
-function ensureFaceProfilesTable() {
-  const db = getDb();
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS user_face_profiles (
-      user_id TEXT PRIMARY KEY,
-      descriptors_json TEXT NOT NULL DEFAULT '[]',
-      reference_images_json TEXT NOT NULL DEFAULT '[]',
-      enrolled_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-  `);
-  migrateLegacyFaceProfilesSchema(db);
-}
-
-function migrateLegacyFaceProfilesSchema(db) {
-  const columns = db.prepare(`PRAGMA table_info(user_face_profiles)`).all();
-  const columnNames = columns.map((col) => col.name);
-  if (!columnNames.length) return;
-
-  if (columnNames.includes("descriptors_json")) {
-    return;
-  }
-
-  if (!columnNames.includes("descriptor_json")) {
-    return;
-  }
-
-  console.log("[FACE] Migrating user_face_profiles to multi-reference schema…");
-  const rows = db.prepare(`SELECT * FROM user_face_profiles`).all();
-
-  db.exec(`
-    CREATE TABLE user_face_profiles_migrated (
-      user_id TEXT PRIMARY KEY,
-      descriptors_json TEXT NOT NULL DEFAULT '[]',
-      reference_images_json TEXT NOT NULL DEFAULT '[]',
-      enrolled_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-  `);
-
-  const insert = db.prepare(
-    `INSERT INTO user_face_profiles_migrated
-     (user_id, descriptors_json, reference_images_json, enrolled_at, updated_at)
-     VALUES (@user_id, @descriptors_json, @reference_images_json, @enrolled_at, @updated_at)`
-  );
-
-  for (const row of rows) {
-    let legacyDescriptorRaw = [];
-    try {
-      legacyDescriptorRaw = JSON.parse(row.descriptor_json || "[]");
-    } catch {
-      legacyDescriptorRaw = [];
-    }
-    const descriptors = normalizeDescriptorsPayload(legacyDescriptorRaw);
-    const legacyPath = row.reference_image_path || getLegacyReferenceImagePath(row.user_id);
-    const imagePaths = legacyPath && fs.existsSync(legacyPath) ? [legacyPath] : [];
-    insert.run({
-      user_id: row.user_id,
-      descriptors_json: JSON.stringify(descriptors),
-      reference_images_json: JSON.stringify(imagePaths),
-      enrolled_at: row.enrolled_at,
-      updated_at: row.updated_at,
-    });
-  }
-
-  db.exec(`DROP TABLE user_face_profiles`);
-  db.exec(`ALTER TABLE user_face_profiles_migrated RENAME TO user_face_profiles`);
-  console.log("[FACE] Multi-reference migration complete:", rows.length, "profile(s)");
-}
-
 function getLegacyReferenceImagePath(userId) {
   return path.join(FACE_PROFILES_DIR, `${String(userId || "").trim()}.jpg`);
 }
@@ -243,8 +175,8 @@ function referenceImageExists(userId) {
   return countStoredReferenceImages(userId) > 0;
 }
 
-function getFaceReferenceCount(userId) {
-  const profile = getFaceProfile(userId);
+async function getFaceReferenceCount(userId) {
+  const profile = await getFaceProfile(userId);
   const descriptorCount = profile?.descriptors?.length || 0;
   const imageCount = countStoredReferenceImages(userId);
   return Math.max(descriptorCount, imageCount);
@@ -819,7 +751,7 @@ async function integrateLiveFaceEmbedding(userId, descriptor, imageBuffer) {
     throw new Error("image buffer is required for gallery adaptation.");
   }
 
-  const profile = getFaceProfile(id);
+  const profile = await getFaceProfile(id);
   const descriptors = [...(profile?.descriptors || [])];
   const imagePaths = [...(profile?.reference_image_paths || [])];
   const jpegBuffer = await normalizeImageBufferForFace(imageBuffer);
@@ -846,7 +778,7 @@ async function integrateLiveFaceEmbedding(userId, descriptor, imageBuffer) {
   descriptors.push(descriptor);
   imagePaths.push(imagePath);
 
-  const record = persistFaceProfileRecord(
+  const record = await persistFaceProfileRecord(
     id,
     descriptors,
     imagePaths,
@@ -865,12 +797,8 @@ async function integrateLiveFaceEmbedding(userId, descriptor, imageBuffer) {
   };
 }
 
-function getFaceProfile(userId) {
-  ensureFaceProfilesTable();
-  const db = getDb();
-  const row = db
-    .prepare(`SELECT * FROM user_face_profiles WHERE user_id = ?`)
-    .get(String(userId || ""));
+async function getFaceProfile(userId) {
+  const row = await loadFaceProfileRow(userId);
   if (!row) return null;
 
   const descriptors = normalizeDescriptorsPayload(parseJsonArray(row.descriptors_json));
@@ -888,34 +816,19 @@ function getFaceProfile(userId) {
   };
 }
 
-function persistFaceProfileRecord(userId, descriptors, imagePaths, enrolledAt) {
-  ensureFaceProfilesTable();
+async function persistFaceProfileRecord(userId, descriptors, imagePaths, enrolledAt) {
   const id = String(userId || "").trim();
   const now = new Date().toISOString();
-  const db = getDb();
+  const existing = await getFaceProfile(id);
   const record = {
     user_id: id,
     descriptors_json: JSON.stringify(descriptors),
     reference_images_json: JSON.stringify(imagePaths),
-    enrolled_at: enrolledAt || now,
+    enrolled_at: enrolledAt || existing?.enrolled_at || now,
     updated_at: now,
   };
 
-  const existing = getFaceProfile(id);
-  if (existing) {
-    db.prepare(
-      `UPDATE user_face_profiles
-       SET descriptors_json = @descriptors_json,
-           reference_images_json = @reference_images_json,
-           updated_at = @updated_at
-       WHERE user_id = @user_id`
-    ).run(record);
-  } else {
-    db.prepare(
-      `INSERT INTO user_face_profiles (user_id, descriptors_json, reference_images_json, enrolled_at, updated_at)
-       VALUES (@user_id, @descriptors_json, @reference_images_json, @enrolled_at, @updated_at)`
-    ).run(record);
-  }
+  await upsertFaceProfileRow(record);
 
   return {
     ...record,
@@ -936,7 +849,7 @@ function writeReferenceImageFile(userId, index, imageBuffer) {
 
 async function appendFaceReference(userId, imageBuffer) {
   const id = String(userId || "").trim();
-  const profile = getFaceProfile(id);
+  const profile = await getFaceProfile(id);
   const descriptors = [...(profile?.descriptors || [])];
   const imagePaths = [...(profile?.reference_image_paths || [])];
 
@@ -955,7 +868,7 @@ async function appendFaceReference(userId, imageBuffer) {
   descriptors.push(descriptor);
   imagePaths.push(imagePath);
 
-  const record = persistFaceProfileRecord(
+  const record = await persistFaceProfileRecord(
     id,
     descriptors,
     imagePaths,
@@ -984,10 +897,10 @@ async function registerAdminFaceProfiles(userId, imageBuffers, { replace = false
   }
 
   if (replace) {
-    removeFaceProfileForUser(id);
+    await removeFaceProfileForUser(id);
   }
 
-  const existingCount = getFaceProfile(id)?.descriptors?.length || 0;
+  const existingCount = (await getFaceProfile(id))?.descriptors?.length || 0;
   if (existingCount + buffers.length > MAX_FACE_REFERENCES) {
     throw new Error(
       `Cannot store more than ${MAX_FACE_REFERENCES} reference images per user (current: ${existingCount}, uploading: ${buffers.length}).`
@@ -999,7 +912,7 @@ async function registerAdminFaceProfiles(userId, imageBuffers, { replace = false
     results.push(await appendFaceReference(id, buffer));
   }
 
-  const profile = getFaceProfile(id);
+  const profile = await getFaceProfile(id);
   console.log(
     "[FACE] Admin registered",
     buffers.length,
@@ -1068,8 +981,8 @@ async function rebuildMissingDescriptorsFromImages(userId) {
   }
 
   if (descriptors.length) {
-    const profile = getFaceProfile(id);
-    persistFaceProfileRecord(id, descriptors, imagePaths, profile?.enrolled_at);
+    const profile = await getFaceProfile(id);
+    await persistFaceProfileRecord(id, descriptors, imagePaths, profile?.enrolled_at);
   }
 
   return descriptors;
@@ -1081,7 +994,7 @@ async function getReferenceDescriptors(userId) {
     throw buildFaceProfileNotConfiguredError();
   }
 
-  let profile = getFaceProfile(id);
+  let profile = await getFaceProfile(id);
   if (profile?.descriptors?.length) {
     return profile.descriptors;
   }
@@ -1176,13 +1089,11 @@ async function verifyUserFace(userId, imageInput) {
   }
 }
 
-function removeFaceProfileForUser(userId) {
+async function removeFaceProfileForUser(userId) {
   const id = String(userId || "").trim();
   if (!id) return;
 
-  ensureFaceProfilesTable();
-
-  const profile = getFaceProfile(id);
+  const profile = await getFaceProfile(id);
   const paths = new Set([
     ...(profile?.reference_image_paths || []),
     getLegacyReferenceImagePath(id),
@@ -1211,8 +1122,7 @@ function removeFaceProfileForUser(userId) {
     /* ignore */
   }
 
-  const db = getDb();
-  db.prepare(`DELETE FROM user_face_profiles WHERE user_id = ?`).run(id);
+  await deleteFaceProfileRow(id);
 }
 
 module.exports = {

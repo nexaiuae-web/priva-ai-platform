@@ -1028,8 +1028,8 @@ adminRouter.get("/users", requireAuth, requireAdmin, async (_req, res) => {
     const userRows = await Promise.resolve(listUsersForAdmin());
     const users = await Promise.all(
       userRows.map(async (user) => {
-        const profile = getFaceProfile(user.id);
-        const referenceCount = getFaceReferenceCount(user.id);
+        const profile = await getFaceProfile(user.id);
+        const referenceCount = await getFaceReferenceCount(user.id);
         const storageSnapshot = await getUserStorageSnapshot(user.id);
         return {
           ...user,
@@ -1237,8 +1237,8 @@ adminRouter.post(
       });
     } catch (error) {
       if (createdUser?.id) {
-        removeFaceProfileForUser(createdUser.id);
-        deleteUserById(createdUser.id);
+        await removeFaceProfileForUser(createdUser.id);
+        await Promise.resolve(deleteUserById(createdUser.id));
       }
 
       console.error("[ADMIN] create-with-face error:", error.message);
@@ -1310,7 +1310,10 @@ adminRouter.post(
         });
       }
 
-      if (!replace && getFaceReferenceCount(userId) + faceBuffers.length > MAX_FACE_REFERENCES) {
+      if (
+        !replace &&
+        (await getFaceReferenceCount(userId)) + faceBuffers.length > MAX_FACE_REFERENCES
+      ) {
         return res.status(400).json({
           error: `Cannot exceed ${MAX_FACE_REFERENCES} reference images per user. Use replace=true to replace the full gallery.`,
         });
