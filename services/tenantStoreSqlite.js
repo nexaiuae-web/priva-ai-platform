@@ -354,6 +354,14 @@ function updateCompanyLimits(companyId, { storage_limit_mb }) {
   };
 }
 
+function listUserIdsByCompanyId(companyId) {
+  const db = getDb();
+  const id = String(companyId || "").trim();
+  if (!id) return [];
+  const rows = db.prepare(`SELECT id FROM users WHERE company_id = ?`).all(id);
+  return rows.map((row) => row.id).filter(Boolean);
+}
+
 function deleteUserById(userId) {
   const db = getDb();
   const id = String(userId || "").trim();
@@ -362,6 +370,8 @@ function deleteUserById(userId) {
   const existing = findUserById(id);
   if (!existing) return false;
 
+  db.prepare(`DELETE FROM user_sessions WHERE user_id = ?`).run(id);
+  db.prepare(`DELETE FROM user_face_profiles WHERE user_id = ?`).run(id);
   db.prepare(`DELETE FROM users WHERE id = ?`).run(id);
   return true;
 }
@@ -375,6 +385,10 @@ function deleteCompanyById(companyId) {
   if (!existing) return false;
 
   const tx = db.transaction(() => {
+    db.prepare(`DELETE FROM user_sessions WHERE company_id = ?`).run(id);
+    db.prepare(`DELETE FROM user_face_profiles WHERE user_id IN (SELECT id FROM users WHERE company_id = ?)`).run(
+      id
+    );
     db.prepare(`DELETE FROM users WHERE company_id = ?`).run(id);
     db.prepare(`DELETE FROM companies WHERE id = ?`).run(id);
   });
@@ -573,6 +587,7 @@ module.exports = {
   updateCompanyLimits,
   deleteCompanyById,
   deleteUserById,
+  listUserIdsByCompanyId,
   findUserById,
   findUserByUsername,
   listUsersForAdmin,

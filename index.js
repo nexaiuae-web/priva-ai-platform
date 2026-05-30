@@ -61,8 +61,6 @@ const {
   createCompany: createTenantCompany,
   createUser: createTenantUser,
   updateUserById: updateTenantUser,
-  deleteUserById,
-  deleteCompanyById: deleteTenantCompany,
   getCompanyById: getTenantCompanyById,
   listCompaniesWithStats,
   getTenantMetrics,
@@ -73,6 +71,7 @@ const {
   isSystemAdminAccount,
   listUsersForAdmin,
 } = require("./services/tenantStore");
+const { purgeWorkspaceUser, purgeCompanyWithUsers } = require("./services/userLifecycle");
 const { resolveCompanyId, resolveCompanyRecord } = require("./services/companyResolver");
 const { isImageUpload, isPdfUpload } = require("./services/fileType");
 const {
@@ -1157,6 +1156,38 @@ adminRouter.patch("/users/:userId", requireAuth, requireAdmin, async (req, res, 
   }
 });
 
+adminRouter.delete("/users/:id", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const userId = String(req.params.id || "").trim();
+    if (!userId) {
+      return res.status(400).json({ error: "User id is required." });
+    }
+
+    console.log("[ADMIN] DELETE /users/:id | id:", userId);
+
+    const result = await purgeWorkspaceUser(userId);
+    if (result.reason === "system_admin_protected") {
+      return res.status(403).json({
+        error: "Cannot delete the system administrator account.",
+        user_id: userId,
+      });
+    }
+    if (!result.removed) {
+      return res.status(404).json({ error: "User not found.", user_id: userId });
+    }
+
+    return res.json({
+      message: "User and face profile data removed.",
+      user_id: result.user_id,
+      username: result.username,
+      company_id: result.company_id,
+    });
+  } catch (error) {
+    console.error("[ADMIN] DELETE /users/:id error:", error.message);
+    return next(error);
+  }
+});
+
 adminRouter.post(
   "/users/create-with-face",
   requireAuth,
@@ -1237,8 +1268,7 @@ adminRouter.post(
       });
     } catch (error) {
       if (createdUser?.id) {
-        await removeFaceProfileForUser(createdUser.id);
-        await Promise.resolve(deleteUserById(createdUser.id));
+        await purgeWorkspaceUser(createdUser.id);
       }
 
       console.error("[ADMIN] create-with-face error:", error.message);
@@ -1364,16 +1394,21 @@ adminRouter.delete("/companies/:id", requireAuth, requireAdmin, async (req, res,
       return res.status(400).json({ error: "Company id is required." });
     }
 
-    const removed = deleteTenantCompany(companyId);
-    if (!removed) {
+    console.log("[ADMIN] DELETE /companies/:id | id:", companyId);
+
+    const result = await purgeCompanyWithUsers(companyId);
+    if (!result.removed) {
       return res.status(404).json({ error: "Company not found.", company_id: companyId });
     }
 
     return res.json({
       message: "Company and its users were removed.",
       company_id: companyId,
+      users_removed: result.users_removed,
+      faces_purged: result.faces_purged,
     });
   } catch (error) {
+    console.error("[ADMIN] DELETE /companies/:id error:", error.message);
     return next(error);
   }
 });

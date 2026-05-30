@@ -229,20 +229,34 @@ async function updateCompanyLimits(companyId, { storage_limit_mb }) {
   };
 }
 
+async function listUserIdsByCompanyId(companyId) {
+  const id = String(companyId || "").trim();
+  if (!id) return [];
+  const docs = await User.find({ company_id: id }, { id: 1 }).lean();
+  return docs.map((doc) => doc.id).filter(Boolean);
+}
+
 async function deleteUserById(userId) {
   const id = String(userId || "").trim();
+  if (!id) return false;
+
   try {
     const UserFaceProfile = require("../models/UserFaceProfile");
     await UserFaceProfile.deleteOne({ user_id: id });
   } catch {
     /* face profile collection may be unavailable */
   }
+
+  await UserSession.deleteMany({ user_id: id });
   const result = await User.deleteOne({ id });
   return result.deletedCount > 0;
 }
 
 async function deleteCompanyById(companyId) {
   const id = String(companyId || "").trim();
+  if (!id) return false;
+
+  await UserSession.deleteMany({ company_id: id });
   await User.deleteMany({ company_id: id });
   const result = await Company.deleteOne({ id });
   return result.deletedCount > 0;
@@ -373,6 +387,7 @@ module.exports = {
   updateCompanyLimits,
   deleteCompanyById,
   deleteUserById,
+  listUserIdsByCompanyId,
   findUserById,
   findUserByUsername,
   listUsersForAdmin,
