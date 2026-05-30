@@ -96,7 +96,7 @@ async function getReservedUploadStorageBytes(company_id, { excludeJobId = null }
 
 async function getTotalTenantStorageUsedBytes(company_id, options = {}) {
   const committed = await getCommittedDocumentStorageBytes(company_id);
-  const reserved = getReservedUploadStorageBytes(company_id, options);
+  const reserved = await getReservedUploadStorageBytes(company_id, options);
   return committed + reserved;
 }
 
@@ -236,7 +236,7 @@ async function getUserReservedUploadStorageBytes(user_id, { excludeJobId = null 
 
 async function getUserTotalStorageUsedBytes(user_id, options = {}) {
   const committed = await getUserCommittedDocumentStorageBytes(user_id);
-  const reserved = getUserReservedUploadStorageBytes(user_id, options);
+  const reserved = await getUserReservedUploadStorageBytes(user_id, options);
   return committed + reserved;
 }
 
@@ -287,7 +287,7 @@ async function assertUserStorageForUpload(user_id, newFileBytes, options = {}) {
     return null;
   }
 
-  const limitMb = getUserStorageLimitMbResolved(user.id);
+  const limitMb = await Promise.resolve(getUserStorageLimitMbResolved(user.id));
   const limitBytes = limitMb * BYTES_PER_MB;
 
   let committedBytes = await getUserCommittedDocumentStorageBytes(user.id);
@@ -336,7 +336,7 @@ async function getTenantStorageSnapshot(company_id, options = {}) {
   const limitMb = await getTenantStorageLimit(company.id);
   const limitBytes = limitMb * BYTES_PER_MB;
   const committedBytes = await getCommittedDocumentStorageBytes(company.id);
-  const reservedBytes = getReservedUploadStorageBytes(company.id, options);
+  const reservedBytes = await getReservedUploadStorageBytes(company.id, options);
   const usedBytes = committedBytes + reservedBytes;
 
   return {

@@ -1069,13 +1069,15 @@ adminRouter.post("/users", requireAuth, requireAdmin, async (req, res, next) => 
       storage_limit_mb_raw
     );
 
-    const user = createTenantUser({
-      username,
-      password,
-      company_id,
-      role: "user",
-      storage_limit_mb,
-    });
+    const user = await Promise.resolve(
+      createTenantUser({
+        username,
+        password,
+        company_id,
+        role: "user",
+        storage_limit_mb,
+      })
+    );
 
     const storageSnapshot = await getUserStorageSnapshot(user.id);
 
@@ -1126,7 +1128,7 @@ adminRouter.patch("/users/:userId", requireAuth, requireAdmin, async (req, res, 
       storage_limit_mb_raw
     );
 
-    const user = updateTenantUser(userId, { storage_limit_mb });
+    const user = await Promise.resolve(updateTenantUser(userId, { storage_limit_mb }));
     if (!user) {
       return res.status(404).json({ error: "User not found.", user_id: userId });
     }
@@ -1194,13 +1196,15 @@ adminRouter.post(
         storage_limit_mb_raw
       );
 
-      createdUser = createTenantUser({
-        username,
-        password,
-        company_id,
-        role: "user",
-        storage_limit_mb,
-      });
+      createdUser = await Promise.resolve(
+        createTenantUser({
+          username,
+          password,
+          company_id,
+          role: "user",
+          storage_limit_mb,
+        })
+      );
 
       console.log(
         "[ADMIN] POST create-with-face | user:",
