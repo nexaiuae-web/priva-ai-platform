@@ -673,15 +673,19 @@ async function listDocumentsHandlerCore(req, res) {
     }
 
     attachTrialAuthContext(req, trialCompanyId);
-    const docs = await listDocumentsForTrialSandbox(trialCompanyId);
+    const fingerprint = getFingerprintFromRequest(req);
+    const docs = await listDocumentsForTrialSandbox(trialCompanyId, { fingerprint });
+    console.log("DB Docs Found:", docs);
     const payload = docs.map(serializeDocumentListItem);
 
     console.log(
       "[DOCUMENTS] TRIAL GET",
       trialCompanyId,
+      "fingerprint:",
+      fingerprint ? "present" : "missing",
       "→",
       payload.length,
-      "items (strict sandbox)"
+      "items (sandbox + orphan fallback)"
     );
     return respondDocumentsList(res, payload);
   }
@@ -715,6 +719,7 @@ async function listDocumentsHandlerCore(req, res) {
     user_id: scopeUserId,
     folder_id,
   });
+  console.log("DB Docs Found:", docs);
   const payload = docs.map(serializeDocumentListItem);
 
   console.log(

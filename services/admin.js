@@ -198,13 +198,7 @@ function documentMatchesFolderScope(doc, folder_id) {
   return String(docFolder) === String(folder_id);
 }
 
-async function listDocumentsForTrialSandbox(company_id) {
-  const companyId = String(company_id || "").trim();
-  if (!companyId || !companyId.startsWith("trial_")) {
-    return [];
-  }
-
-  const docs = await Document.find({ company_id: companyId }).lean();
+async function mapDocumentsToListRows(docs) {
   const docIds = docs.map((doc) => String(doc.id));
   const parentCounts = new Map();
   if (docIds.length > 0) {
@@ -229,6 +223,88 @@ async function listDocumentsForTrialSandbox(company_id) {
       parent_count: parentCounts.get(String(doc.id)) || 0,
     }))
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+}
+
+async function findOrphanedTrialDocuments(fingerprint, primaryCompanyId, knownDocIds = new Set()) {
+  const fingerprintStr = String(fingerprint || "").trim();
+  if (!fingerprintStr) return [];
+
+  const UploadJob = require("../models/UploadJob");
+  const jobs = await UploadJob.find({
+    is_trial: true,
+    $or: [{ trial_fingerprint: fingerprintStr }, { company_id: primaryCompanyId }],
+  })
+    .select("id company_id result status")
+    .lean();
+
+  if (!jobs.length) return [];
+
+  const jobIds = [];
+  const altCompanyIds = new Set();
+  const resultDocIds = [];
+
+  for (const job of jobs) {
+    jobIds.push(String(job.id));
+    const jobCompanyId = String(job.company_id || "").trim();
+    if (jobCompanyId && jobCompanyId !== primaryCompanyId) {
+      altCompanyIds.add(jobCompanyId);
+    }
+    const result = job.result && typeof job.result === "object" ? job.result : null;
+    const docId = result?.document_id || result?.id;
+    if (docId) {
+      resultDocIds.push(String(docId));
+    }
+  }
+
+  const orClauses = [{ upload_job_id: { $in: jobIds } }];
+  if (resultDocIds.length) {
+    orClauses.push({ id: { $in: resultDocIds } });
+  }
+  if (altCompanyIds.size) {
+    orClauses.push({ company_id: { $in: [...altCompanyIds] } });
+  }
+  orClauses.push({
+    company_id: "default",
+    upload_job_id: { $in: jobIds },
+  });
+
+  const candidates = await Document.find({ $or: orClauses }).lean();
+  const orphans = candidates.filter((doc) => !knownDocIds.has(String(doc.id)));
+
+  if (orphans.length) {
+    console.warn("[DOCUMENTS] TRIAL orphan fallback matched documents", {
+      primaryCompanyId,
+      fingerprint: "present",
+      orphanCount: orphans.length,
+      orphanCompanyIds: [...new Set(orphans.map((doc) => doc.company_id))],
+    });
+  }
+
+  return orphans;
+}
+
+async function listDocumentsForTrialSandbox(company_id, { fingerprint = null } = {}) {
+  const companyId = String(company_id || "").trim();
+  if (!companyId || !companyId.startsWith("trial_")) {
+    return [];
+  }
+
+  const primaryDocs = await Document.find({ company_id: companyId }).lean();
+  const mergedById = new Map();
+  for (const doc of primaryDocs) {
+    mergedById.set(String(doc.id), doc);
+  }
+
+  const orphanDocs = await findOrphanedTrialDocuments(
+    fingerprint,
+    companyId,
+    new Set([...mergedById.keys()])
+  );
+  for (const doc of orphanDocs) {
+    mergedById.set(String(doc.id), doc);
+  }
+
+  return mapDocumentsToListRows([...mergedById.values()]);
 }
 
 async function listDocumentsByCompany(
@@ -256,30 +332,7 @@ async function listDocumentsByCompany(
     );
   });
 
-  const docIds = filtered.map((doc) => String(doc.id));
-  const parentCounts = new Map();
-  if (docIds.length > 0) {
-    const counts = await DocumentParent.aggregate([
-      { $match: { document_id: { $in: docIds } } },
-      { $group: { _id: "$document_id", count: { $sum: 1 } } },
-    ]);
-    for (const item of counts) {
-      parentCounts.set(String(item._id), Number(item.count) || 0);
-    }
-  }
-
-  return filtered
-    .map((doc) => ({
-      id: doc.id,
-      company_id: doc.company_id,
-      folder_id: doc.folder_id ?? null,
-      filename: doc.filename,
-      mime_type: doc.mime_type,
-      created_at: doc.created_at,
-      vector_count: Array.isArray(doc.chunks) ? doc.chunks.length : 0,
-      parent_count: parentCounts.get(String(doc.id)) || 0,
-    }))
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  return mapDocumentsToListRows(filtered);
 }
 
 async function deleteDocumentById(company_id, documentId) {
@@ -399,6 +452,7 @@ async function saveDocumentForCompany({
     detected_document_type,
     ocr_verification,
     file_size_bytes: incomingBytes,
+    upload_job_id: upload_job_id || null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     status: "complete",
