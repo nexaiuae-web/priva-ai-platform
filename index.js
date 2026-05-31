@@ -115,7 +115,7 @@ const { enqueueUploadJob } = require("./services/uploadQueue");
 const { setDocumentUploadRetriever } = require("./services/documentUploadWorker");
 const {
   enforceTrialChatLimit,
-  enforceTrialUploadStorageLimit,
+  checkTrialUploadLimits,
   getTrialStatusFromRequest,
   isTrialModeRequest,
   isValidTrialCompanyId,
@@ -352,15 +352,51 @@ function respondToFaceProcessingError(res, error) {
 }
 
 /** Accept multipart field `file` or `document` (frontend may use either). */
+function discardStagedUploadFile(req) {
+  try {
+    if (req.file?.path && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 function documentUploadMiddleware(req, res, next) {
-  upload.fields([
+  const multerHandler = upload.fields([
     { name: "file", maxCount: 1 },
     { name: "document", maxCount: 1 },
-  ])(req, res, (err) => {
-    if (err) return next(err);
-    const files = req.files || {};
-    req.file = files.file?.[0] || files.document?.[0] || null;
-    next();
+  ]);
+
+  multerHandler(req, res, (err) => {
+    if (err) {
+      return next(err);
+    }
+    try {
+      const files = req.files || {};
+      req.file = files.file?.[0] || files.document?.[0] || null;
+      return next();
+    } catch (setupError) {
+      return next(setupError);
+    }
+  });
+}
+
+function forwardUploadHandlerError(res, next, error) {
+  if (res.headersSent) {
+    return;
+  }
+  const quotaResponse = handleStorageQuotaError(res, error);
+  if (quotaResponse) {
+    return quotaResponse;
+  }
+  if (typeof next === "function") {
+    return next(error);
+  }
+  console.error("[UPLOAD] handler error (no next):", error.message);
+  return res.status(500).json({
+    error: "UPLOAD_FAILED",
+    message: error.message || "Upload failed.",
   });
 }
 
@@ -451,7 +487,7 @@ async function resolveUploadCompanyId(req) {
   return companyId;
 }
 
-async function acceptDocumentUpload(req, res, next) {
+async function acceptDocumentUploadCore(req, res) {
   const uploadId = req.pendingUploadId || crypto.randomUUID();
 
   console.log("\n========== [UPLOAD] REQUEST RECEIVED (background mode) ==========");
@@ -459,141 +495,124 @@ async function acceptDocumentUpload(req, res, next) {
   console.log("[UPLOAD] Path:", req.originalUrl);
   console.log("[UPLOAD] upload_id:", uploadId);
 
-  try {
-    if (!req.file) {
-      console.error("[UPLOAD] ❌ No file in multipart (fields: file, document)");
-      return res.status(400).json({
-        error: "No file received. Use multipart field name 'file' or 'document'.",
-      });
-    }
-
-    const mimeType = String(req.file.mimetype || "").toLowerCase();
-    const isPdf = isPdfUpload(req.file);
-    const isImage = isImageUpload(req.file);
-
-    console.log(
-      "[UPLOAD] ✅ File staged:",
-      req.file.originalname,
-      req.file.size,
-      "bytes | path:",
-      req.file.path
-    );
-
-    if (!isPdf && !isImage) {
-      try {
-        if (req.file.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-      } catch {
-        /* ignore */
-      }
-      return res.status(400).json({
-        error:
-          "Unsupported file type. Upload a PDF or an image (PNG, JPG, JPEG, WEBP, GIF, BMP, TIFF).",
-        mimetype: mimeType || null,
-        filename: req.file.originalname,
-      });
-    }
-
-    const trialStorage = await enforceTrialUploadStorageLimit(
-      req,
-      res,
-      Number(req.file.size || 0)
-    );
-    if (!trialStorage.ok) {
-      try {
-        if (req.file.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-      } catch {
-        /* ignore */
-      }
-      return trialStorage.response;
-    }
-
-    const companyId = await resolveUploadCompanyId(req);
-    if (!companyId && isTrialModeRequest(req)) {
-      return respondMissingTrialFingerprint(res);
-    }
-    const trialMode = isTrialModeRequest(req);
-    const company = trialMode
-      ? { id: companyId, company_name: "Free Trial Sandbox", name: "Free Trial Sandbox" }
-      : await resolveCompanyRecord(companyId);
-    if (!company) {
-      return res.status(404).json({ error: "Company not found.", company_id: companyId });
-    }
-
-    const userId = req.auth?.user?.id || null;
-    const { normalizeFolderId, assertFolderAccess } = require("./services/folders");
-    const folder_id = normalizeFolderId(
-      req.body?.folder_id ?? req.body?.folderId ?? req.query?.folder_id
-    );
-
-    if (trialMode && folder_id) {
-      return res.status(400).json({
-        error: "TRIAL_FOLDER_SCOPE_NOT_ALLOWED",
-        code: "TRIAL_FOLDER_SCOPE_NOT_ALLOWED",
-        message: "Folder-scoped uploads are not available in Free Trial mode.",
-      });
-    }
-
-    if (folder_id && !trialMode) {
-      await assertFolderAccess(folder_id, {
-        user_id: userId,
-        company_id: company.id,
-      });
-    }
-
-    if (!trialMode) {
-      try {
-        await assertStorageLimitForUpload(company.id, req.file.size, {
-          filename: req.file.originalname,
-          userId,
-        });
-      } catch (storageError) {
-        const quotaResponse = handleStorageQuotaError(res, storageError);
-        if (quotaResponse) return quotaResponse;
-        throw storageError;
-      }
-    }
-
-    await createUploadJob({
-      id: uploadId,
-      user_id: userId,
-      folder_id,
-      company_id: company.id,
-      is_trial: trialMode,
-      trial_fingerprint: trialMode ? getFingerprintFromRequest(req) : null,
-      filename: req.file.originalname,
-      mime_type: req.file.mimetype,
-      file_path: req.file.path,
-      file_size_bytes: req.file.size,
-      status: "processing",
-      phase: "queued",
-      message: "File received — queued for background processing",
-      percent: 2,
+  if (!req.file) {
+    console.error("[UPLOAD] ❌ No file in multipart (fields: file, document)");
+    res.status(400).json({
+      error: "No file received. Use multipart field name 'file' or 'document'.",
     });
-
-    enqueueUploadJob(uploadId);
-
-    return res.status(202).json({
-      upload_id: uploadId,
-      job_id: uploadId,
-      status: "processing",
-      message:
-        "Document accepted. Processing continues in the background even if you close the app.",
-      filename: req.file.originalname,
-      poll_url: `/api/documents/status/${uploadId}`,
-    });
-  } catch (error) {
-    console.error("[UPLOAD] ❌ accept:", error.message);
-    if (req.file?.path) {
-      try {
-        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-      } catch {
-        /* ignore */
-      }
-    }
-    const quotaResponse = handleStorageQuotaError(res, error);
-    if (quotaResponse) return quotaResponse;
-    return next(error);
+    return;
   }
+
+  const mimeType = String(req.file.mimetype || "").toLowerCase();
+  const isPdf = isPdfUpload(req.file);
+  const isImage = isImageUpload(req.file);
+
+  console.log(
+    "[UPLOAD] ✅ File staged:",
+    req.file.originalname,
+    req.file.size,
+    "bytes | path:",
+    req.file.path
+  );
+
+  if (!isPdf && !isImage) {
+    discardStagedUploadFile(req);
+    res.status(400).json({
+      error:
+        "Unsupported file type. Upload a PDF or an image (PNG, JPG, JPEG, WEBP, GIF, BMP, TIFF).",
+      mimetype: mimeType || null,
+      filename: req.file.originalname,
+    });
+    return;
+  }
+
+  const companyId = await resolveUploadCompanyId(req);
+  if (!companyId && isTrialModeRequest(req)) {
+    respondMissingTrialFingerprint(res);
+    return;
+  }
+  const trialMode = isTrialModeRequest(req);
+  const company = trialMode
+    ? { id: companyId, company_name: "Free Trial Sandbox", name: "Free Trial Sandbox" }
+    : await resolveCompanyRecord(companyId);
+  if (!company) {
+    res.status(404).json({ error: "Company not found.", company_id: companyId });
+    return;
+  }
+
+  const userId = req.auth?.user?.id || null;
+  const { normalizeFolderId, assertFolderAccess } = require("./services/folders");
+  const folder_id = normalizeFolderId(
+    req.body?.folder_id ?? req.body?.folderId ?? req.query?.folder_id
+  );
+
+  if (trialMode && folder_id) {
+    res.status(400).json({
+      error: "TRIAL_FOLDER_SCOPE_NOT_ALLOWED",
+      code: "TRIAL_FOLDER_SCOPE_NOT_ALLOWED",
+      message: "Folder-scoped uploads are not available in Free Trial mode.",
+    });
+    return;
+  }
+
+  if (folder_id && !trialMode) {
+    await assertFolderAccess(folder_id, {
+      user_id: userId,
+      company_id: company.id,
+    });
+  }
+
+  if (!trialMode) {
+    try {
+      await assertStorageLimitForUpload(company.id, req.file.size, {
+        filename: req.file.originalname,
+        userId,
+      });
+    } catch (storageError) {
+      const quotaResponse = handleStorageQuotaError(res, storageError);
+      if (quotaResponse) {
+        return;
+      }
+      throw storageError;
+    }
+  }
+
+  await createUploadJob({
+    id: uploadId,
+    user_id: userId,
+    folder_id,
+    company_id: company.id,
+    is_trial: trialMode,
+    trial_fingerprint: trialMode ? getFingerprintFromRequest(req) : null,
+    filename: req.file.originalname,
+    mime_type: req.file.mimetype,
+    file_path: req.file.path,
+    file_size_bytes: req.file.size,
+    status: "processing",
+    phase: "queued",
+    message: "File received — queued for background processing",
+    percent: 2,
+  });
+
+  enqueueUploadJob(uploadId);
+
+  res.status(202).json({
+    upload_id: uploadId,
+    job_id: uploadId,
+    status: "processing",
+    message:
+      "Document accepted. Processing continues in the background even if you close the app.",
+    filename: req.file.originalname,
+    poll_url: `/api/documents/status/${uploadId}`,
+  });
+}
+
+function acceptDocumentUpload(req, res, next) {
+  void acceptDocumentUploadCore(req, res).catch((error) => {
+    console.error("[UPLOAD] ❌ accept:", error.message);
+    discardStagedUploadFile(req);
+    forwardUploadHandlerError(res, next, error);
+  });
 }
 
 async function resolveDocumentsCompanyId(req) {
@@ -1418,7 +1437,7 @@ adminRouter.delete("/companies/:id", requireAuth, requireAdmin, async (req, res,
 // ============================================
 // 📤 Document upload & list (/api/documents + /api/upload)
 // ============================================
-uploadRouter.post("/", documentUploadMiddleware, acceptDocumentUpload);
+uploadRouter.post("/", documentUploadMiddleware, checkTrialUploadLimits, acceptDocumentUpload);
 
 function serializeUploadJob(job) {
   return {
@@ -1550,7 +1569,7 @@ documentsRouter.get("/", listDocumentsHandler);
 documentsRouter.get("/uploads/active", listActiveUploadsHandler);
 documentsRouter.get("/upload-status/:jobId", uploadStatusHandler);
 documentsRouter.get("/status/:uploadId", uploadStatusHandler);
-documentsRouter.post("/", documentUploadMiddleware, acceptDocumentUpload);
+documentsRouter.post("/", documentUploadMiddleware, checkTrialUploadLimits, acceptDocumentUpload);
 
 documentsRouter.patch("/:id/move", moveDocumentHandler);
 documentsRouter.delete("/:id", requireMasterKey, deleteDocumentHandler);
@@ -2197,6 +2216,13 @@ app.use((error, _req, res, _next) => {
   }
   if (error?.code === "STORAGE_LIMIT_REACHED") {
     return res.status(400).json(buildStorageLimitPayload(error));
+  }
+  if (error?.code === "TRIAL_STORAGE_EXCEEDED" || error?.code === "TRIAL_FINGERPRINT_REQUIRED") {
+    return res.status(400).json({
+      error: error.code,
+      code: error.code,
+      message: message,
+    });
   }
   if (lowered.includes("company not found for provided company_id")) {
     return res.status(404).json({ error: message, company_id: _req.body?.company_id });

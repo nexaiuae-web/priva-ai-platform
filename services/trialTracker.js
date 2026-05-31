@@ -205,32 +205,43 @@ async function enforceTrialChatLimit(req, res) {
   };
 }
 
-async function enforceTrialUploadStorageLimit(req, res, incomingBytes) {
-  if (!isTrialModeRequest(req)) return { ok: true, tracker: null };
+function buildTrialLimitResponse(res, status, body) {
+  return res.status(status).json(body);
+}
+
+async function validateTrialUploadStorage(req, incomingBytes) {
+  if (!isTrialModeRequest(req)) {
+    return { ok: true, tracker: null };
+  }
+
   const fingerprint = getFingerprintFromRequest(req);
   if (!fingerprint) {
     return {
       ok: false,
-      response: res.status(400).json({
+      status: 400,
+      body: {
         error: "TRIAL_FINGERPRINT_REQUIRED",
         code: "TRIAL_FINGERPRINT_REQUIRED",
         message:
           "Free Trial requires a verified device fingerprint header (x-device-fingerprint).",
-      }),
+      },
     };
   }
 
   const tracker = await getOrCreateTrialTrackerByFingerprint(fingerprint);
-  const nextUsed = sanitizeStorageBytes(tracker.storage_used_bytes) + sanitizeStorageBytes(incomingBytes);
+  const nextUsed =
+    sanitizeStorageBytes(tracker.storage_used_bytes) + sanitizeStorageBytes(incomingBytes);
+
   if (nextUsed > TRIAL_MAX_STORAGE_BYTES) {
     return {
       ok: false,
-      response: res.status(400).json({
+      status: 400,
+      body: {
         error: "TRIAL_STORAGE_EXCEEDED",
         code: "TRIAL_STORAGE_EXCEEDED",
         message: "Free Trial storage quota exceeded (5MB max).",
         trial: buildTrialSnapshot(tracker),
-      }),
+      },
     };
   }
 
@@ -244,6 +255,7 @@ async function enforceTrialUploadStorageLimit(req, res, incomingBytes) {
       },
     }
   );
+
   return {
     ok: true,
     tracker: {
@@ -252,6 +264,70 @@ async function enforceTrialUploadStorageLimit(req, res, incomingBytes) {
       updated_at: updatedAt,
     },
   };
+}
+
+async function enforceTrialUploadStorageLimit(req, res, incomingBytes) {
+  const result = await validateTrialUploadStorage(req, incomingBytes);
+  if (!result.ok) {
+    return {
+      ok: false,
+      response: buildTrialLimitResponse(res, result.status, result.body),
+    };
+  }
+  return { ok: true, tracker: result.tracker };
+}
+
+/**
+ * Express middleware — run after multer so req.file.size is available.
+ * Reserves trial storage on success; returns JSON 400 when quota exceeded.
+ */
+async function checkTrialUploadLimits(req, res, next) {
+  if (!isTrialModeRequest(req)) {
+    return next();
+  }
+
+  if (typeof next !== "function") {
+    console.error("[TRIAL] checkTrialUploadLimits: next is not a function");
+    return res.status(500).json({
+      error: "TRIAL_MIDDLEWARE_MISCONFIGURED",
+      message: "Upload middleware chain is misconfigured.",
+    });
+  }
+
+  try {
+    const incomingBytes = Number(req.file?.size || 0);
+    const result = await validateTrialUploadStorage(req, incomingBytes);
+
+    if (!result.ok) {
+      try {
+        const fs = require("fs");
+        if (req.file?.path && fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+        }
+      } catch {
+        /* ignore staged file cleanup errors */
+      }
+      return res.status(result.status).json(result.body);
+    }
+
+    req.trialTracker = result.tracker;
+    return next();
+  } catch (error) {
+    console.error("[TRIAL] checkTrialUploadLimits error:", error.message);
+    try {
+      const fs = require("fs");
+      if (req.file?.path && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch {
+      /* ignore */
+    }
+    return res.status(500).json({
+      error: "TRIAL_QUOTA_CHECK_FAILED",
+      code: "TRIAL_QUOTA_CHECK_FAILED",
+      message: error.message || "Trial quota check failed.",
+    });
+  }
 }
 
 async function getTrialStatusFromRequest(req) {
@@ -304,5 +380,7 @@ module.exports = {
   attachTrialAuthContext,
   enforceTrialChatLimit,
   enforceTrialUploadStorageLimit,
+  checkTrialUploadLimits,
+  validateTrialUploadStorage,
   getTrialStatusFromRequest,
 };
