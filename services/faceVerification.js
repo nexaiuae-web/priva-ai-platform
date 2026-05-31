@@ -9,7 +9,16 @@ const {
   loadFaceProfileRow,
   upsertFaceProfileRow,
   deleteFaceProfileRow,
+  uploadReferenceImage,
+  parseStoredReferences,
+  serializeReferencesForStorage,
 } = require("./faceProfileStore");
+const {
+  destroyReferenceAsset,
+  loadReferenceImageBuffer,
+  referenceUrlsFromAssets,
+  purgeLegacyLocalFaceDirectory,
+} = require("./cloudinaryFaceStorage");
 
 const MODEL_DIR = path.join(
   __dirname,
@@ -155,7 +164,7 @@ function parseJsonArray(raw, fallback = []) {
   }
 }
 
-function countStoredReferenceImages(userId) {
+function countLegacyLocalReferenceImages(userId) {
   const id = String(userId || "").trim();
   let count = 0;
   for (let index = 0; index < MAX_FACE_REFERENCES; index += 1) {
@@ -171,15 +180,21 @@ function countStoredReferenceImages(userId) {
   return count;
 }
 
-function referenceImageExists(userId) {
-  return countStoredReferenceImages(userId) > 0;
+async function referenceImageExists(userId) {
+  const profile = await getFaceProfile(userId);
+  if ((profile?.descriptors?.length || 0) > 0) return true;
+  if ((profile?.reference_assets?.length || 0) > 0) return true;
+  return countLegacyLocalReferenceImages(userId) > 0;
 }
 
 async function getFaceReferenceCount(userId) {
   const profile = await getFaceProfile(userId);
   const descriptorCount = profile?.descriptors?.length || 0;
-  const imageCount = countStoredReferenceImages(userId);
-  return Math.max(descriptorCount, imageCount);
+  const imageCount = profile?.reference_assets?.length || 0;
+  if (imageCount > 0 || descriptorCount > 0) {
+    return Math.max(descriptorCount, imageCount);
+  }
+  return countLegacyLocalReferenceImages(userId);
 }
 
 function buildFaceProfileNotConfiguredError() {
@@ -753,35 +768,29 @@ async function integrateLiveFaceEmbedding(userId, descriptor, imageBuffer) {
 
   const profile = await getFaceProfile(id);
   const descriptors = [...(profile?.descriptors || [])];
-  const imagePaths = [...(profile?.reference_image_paths || [])];
+  const imageRefs = [...(profile?.reference_assets || [])];
   const jpegBuffer = await normalizeImageBufferForFace(imageBuffer);
 
   let action = "appended";
 
   if (descriptors.length >= MAX_FACE_REFERENCES) {
-    const oldestPath = imagePaths.shift();
+    const oldestRef = imageRefs.shift();
     descriptors.shift();
-    if (oldestPath) {
-      try {
-        if (fs.existsSync(oldestPath)) {
-          fs.unlinkSync(oldestPath);
-        }
-      } catch {
-        /* ignore */
-      }
+    if (oldestRef) {
+      await destroyReferenceAsset(oldestRef);
     }
     action = "cycled_oldest";
   }
 
   const slotIndex = descriptors.length;
-  const imagePath = writeReferenceImageFile(id, slotIndex, jpegBuffer);
+  const imageRef = await uploadReferenceImage(id, slotIndex, jpegBuffer);
   descriptors.push(descriptor);
-  imagePaths.push(imagePath);
+  imageRefs.push(imageRef);
 
   const record = await persistFaceProfileRecord(
     id,
     descriptors,
-    imagePaths,
+    imageRefs,
     profile?.enrolled_at
   );
 
@@ -793,7 +802,7 @@ async function integrateLiveFaceEmbedding(userId, descriptor, imageBuffer) {
     action,
     slot_index: slotIndex,
     reference_count: record.reference_count,
-    reference_image_path: imagePath,
+    reference_image_path: imageRef.url || imageRef.localPath || null,
   };
 }
 
@@ -802,56 +811,55 @@ async function getFaceProfile(userId) {
   if (!row) return null;
 
   const descriptors = normalizeDescriptorsPayload(parseJsonArray(row.descriptors_json));
-  const reference_image_paths = parseJsonArray(row.reference_images_json).filter(Boolean);
+  const reference_assets = parseStoredReferences(row.reference_images_json);
+  const reference_image_paths = referenceUrlsFromAssets(reference_assets);
 
   return {
     user_id: row.user_id,
     descriptors,
     descriptor: descriptors[0] || [],
+    reference_assets,
     reference_image_paths,
     reference_image_path: reference_image_paths[0] || null,
-    reference_count: descriptors.length,
+    reference_count: Math.max(descriptors.length, reference_assets.length),
     enrolled_at: row.enrolled_at,
     updated_at: row.updated_at,
   };
 }
 
-async function persistFaceProfileRecord(userId, descriptors, imagePaths, enrolledAt) {
+async function persistFaceProfileRecord(userId, descriptors, imageRefs, enrolledAt) {
   const id = String(userId || "").trim();
   const now = new Date().toISOString();
   const existing = await getFaceProfile(id);
+  const reference_assets = (imageRefs || []).map((ref) =>
+    typeof ref === "string" ? { url: ref.startsWith("http") ? ref : null, localPath: ref } : ref
+  );
   const record = {
     user_id: id,
     descriptors_json: JSON.stringify(descriptors),
-    reference_images_json: JSON.stringify(imagePaths),
+    reference_images_json: serializeReferencesForStorage(reference_assets),
     enrolled_at: enrolledAt || existing?.enrolled_at || now,
     updated_at: now,
   };
 
   await upsertFaceProfileRow(record);
 
+  const reference_image_paths = referenceUrlsFromAssets(reference_assets);
+
   return {
     ...record,
     descriptors,
-    reference_image_paths: imagePaths,
-    reference_count: descriptors.length,
+    reference_assets,
+    reference_image_paths,
+    reference_count: Math.max(descriptors.length, reference_assets.length),
   };
-}
-
-function writeReferenceImageFile(userId, index, imageBuffer) {
-  ensureFaceProfilesDir();
-  const profileDir = getUserFaceProfileDir(userId);
-  fs.mkdirSync(profileDir, { recursive: true });
-  const imagePath = path.join(profileDir, `${index}.jpg`);
-  fs.writeFileSync(imagePath, imageBuffer);
-  return imagePath;
 }
 
 async function appendFaceReference(userId, imageBuffer) {
   const id = String(userId || "").trim();
   const profile = await getFaceProfile(id);
   const descriptors = [...(profile?.descriptors || [])];
-  const imagePaths = [...(profile?.reference_image_paths || [])];
+  const imageRefs = [...(profile?.reference_assets || [])];
 
   if (descriptors.length >= MAX_FACE_REFERENCES) {
     throw new Error(
@@ -863,23 +871,23 @@ async function appendFaceReference(userId, imageBuffer) {
   const { descriptor, preprocessedBuffer } = await extractFaceDescriptorFromBuffer(imageBuffer);
   const jpegBuffer = await normalizeImageBufferForFace(preprocessedBuffer || imageBuffer);
   const slotIndex = descriptors.length;
-  const imagePath = writeReferenceImageFile(id, slotIndex, jpegBuffer);
+  const imageRef = await uploadReferenceImage(id, slotIndex, jpegBuffer);
 
   descriptors.push(descriptor);
-  imagePaths.push(imagePath);
+  imageRefs.push(imageRef);
 
   const record = await persistFaceProfileRecord(
     id,
     descriptors,
-    imagePaths,
+    imageRefs,
     profile?.enrolled_at
   );
 
   return {
     user_id: id,
     slot_index: slotIndex,
-    reference_image_path: imagePath,
-    reference_image_paths: imagePaths,
+    reference_image_path: imageRef.url || imageRef.localPath || null,
+    reference_image_paths: record.reference_image_paths,
     reference_count: record.reference_count,
     has_face_profile: record.reference_count >= MIN_FACE_REFERENCES,
   };
@@ -932,7 +940,7 @@ async function registerAdminFaceProfiles(userId, imageBuffers, { replace = false
 }
 
 /**
- * Admin uploads one or more reference faces (JPG/PNG) under data/face_profiles/{userId}/{index}.jpg
+ * Admin uploads one or more reference faces (stored in Cloudinary when configured).
  */
 async function registerAdminFaceProfile(userId, imageBuffer, options = {}) {
   if (Array.isArray(imageBuffer)) {
@@ -956,18 +964,38 @@ async function registerAdminFaceProfile(userId, imageBuffer, options = {}) {
 
 async function rebuildMissingDescriptorsFromImages(userId) {
   const id = String(userId || "").trim();
-  const imagePaths = [];
+  const imageRefs = [];
   const descriptors = [];
 
-  for (let index = 0; index < MAX_FACE_REFERENCES; index += 1) {
-    const imagePath = getReferenceImagePath(id, index);
-    if (!fs.existsSync(imagePath) || fs.statSync(imagePath).size === 0) {
-      continue;
+  const profile = await getFaceProfile(id);
+  let storedRefs = profile?.reference_assets || [];
+  if (!storedRefs.length) {
+    const row = await loadFaceProfileRow(id);
+    storedRefs = parseStoredReferences(row?.reference_images_json);
+  }
+
+  for (const ref of storedRefs) {
+    try {
+      const jpegBuffer = await loadReferenceImageBuffer(ref);
+      const { descriptor } = await extractFaceDescriptorFromBuffer(jpegBuffer);
+      descriptors.push(descriptor);
+      imageRefs.push(ref);
+    } catch (error) {
+      console.warn("[FACE] skip missing reference image:", id, error.message);
     }
-    const jpegBuffer = fs.readFileSync(imagePath);
-    const { descriptor } = await extractFaceDescriptorFromBuffer(jpegBuffer);
-    descriptors.push(descriptor);
-    imagePaths.push(imagePath);
+  }
+
+  if (!descriptors.length) {
+    for (let index = 0; index < MAX_FACE_REFERENCES; index += 1) {
+      const imagePath = getReferenceImagePath(id, index);
+      if (!fs.existsSync(imagePath) || fs.statSync(imagePath).size === 0) {
+        continue;
+      }
+      const jpegBuffer = fs.readFileSync(imagePath);
+      const { descriptor } = await extractFaceDescriptorFromBuffer(jpegBuffer);
+      descriptors.push(descriptor);
+      imageRefs.push({ localPath: imagePath });
+    }
   }
 
   if (!descriptors.length) {
@@ -976,13 +1004,13 @@ async function rebuildMissingDescriptorsFromImages(userId) {
       const jpegBuffer = fs.readFileSync(legacyPath);
       const { descriptor } = await extractFaceDescriptorFromBuffer(jpegBuffer);
       descriptors.push(descriptor);
-      imagePaths.push(legacyPath);
+      imageRefs.push({ localPath: legacyPath });
     }
   }
 
   if (descriptors.length) {
-    const profile = await getFaceProfile(id);
-    await persistFaceProfileRecord(id, descriptors, imagePaths, profile?.enrolled_at);
+    const existing = await getFaceProfile(id);
+    await persistFaceProfileRecord(id, descriptors, imageRefs, existing?.enrolled_at);
   }
 
   return descriptors;
@@ -990,7 +1018,7 @@ async function rebuildMissingDescriptorsFromImages(userId) {
 
 async function getReferenceDescriptors(userId) {
   const id = String(userId || "").trim();
-  if (!referenceImageExists(id)) {
+  if (!(await referenceImageExists(id))) {
     throw buildFaceProfileNotConfiguredError();
   }
 
@@ -1017,7 +1045,7 @@ async function verifyUserFace(userId, imageInput) {
     throw new Error("user_id is required for face verification.");
   }
 
-  if (!referenceImageExists(id)) {
+  if (!(await referenceImageExists(id))) {
     throw buildFaceProfileNotConfiguredError();
   }
 
@@ -1093,36 +1121,8 @@ async function removeFaceProfileForUser(userId) {
   const id = String(userId || "").trim();
   if (!id) return;
 
-  const profile = await getFaceProfile(id);
-  const paths = new Set([
-    ...(profile?.reference_image_paths || []),
-    getLegacyReferenceImagePath(id),
-  ]);
-
-  for (let index = 0; index < MAX_FACE_REFERENCES; index += 1) {
-    paths.add(getReferenceImagePath(id, index));
-  }
-
-  for (const imagePath of paths) {
-    try {
-      if (imagePath && fs.existsSync(imagePath)) {
-        fs.unlinkSync(imagePath);
-      }
-    } catch {
-      /* ignore missing or locked files */
-    }
-  }
-
-  try {
-    const profileDir = getUserFaceProfileDir(id);
-    if (fs.existsSync(profileDir)) {
-      fs.rmSync(profileDir, { recursive: true, force: true });
-    }
-  } catch {
-    /* ignore */
-  }
-
   await deleteFaceProfileRow(id);
+  purgeLegacyLocalFaceDirectory(id);
 }
 
 module.exports = {

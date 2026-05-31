@@ -9,7 +9,7 @@ const {
 } = require("./tenantStore");
 
 /**
- * Remove face metadata (Mongo/SQLite) and on-disk reference images for a user.
+ * Remove face metadata (Mongo/SQLite), Cloudinary assets, and any legacy local files.
  */
 async function purgeUserFaceAssets(userId) {
   await removeFaceProfileForUser(userId);
@@ -45,7 +45,7 @@ async function purgeWorkspaceUser(userId) {
 }
 
 /**
- * Delete a company and every user in that tenant, including face profiles on disk.
+ * Delete a company and every user in that tenant, including Cloudinary face assets.
  */
 async function purgeCompanyWithUsers(companyId) {
   const id = String(companyId || "").trim();

@@ -1035,7 +1035,9 @@ adminRouter.get("/users", requireAuth, requireAdmin, async (_req, res) => {
           storage_limit_mb: storageSnapshot?.storage_limit_mb ?? user.storage_limit_mb,
           storage_used_mb: storageSnapshot?.storage_used_mb ?? 0,
           storage_remaining_mb: storageSnapshot?.storage_remaining_mb ?? 0,
-          has_face_profile: referenceImageExists(user.id),
+          has_face_profile:
+            (profile?.reference_count || 0) > 0 ||
+            (await referenceImageExists(user.id)),
           face_reference_count: referenceCount,
           max_face_references: MAX_FACE_REFERENCES,
           reference_image_paths: profile?.reference_image_paths || [],

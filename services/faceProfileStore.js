@@ -2,6 +2,13 @@ const path = require("path");
 const fs = require("fs");
 const { getDb } = require("./tenantDb");
 const { useMongoTenants } = require("./runtimeConfig");
+const {
+  parseStoredReferences,
+  serializeReferencesForStorage,
+  destroyReferenceAssets,
+  uploadReferenceImage,
+  purgeLegacyLocalFaceDirectory,
+} = require("./cloudinaryFaceStorage");
 
 const FACE_PROFILES_DIR = path.join(__dirname, "..", "data", "face_profiles");
 
@@ -89,7 +96,7 @@ function migrateLegacyFaceProfilesSchema(db) {
     insert.run({
       user_id: row.user_id,
       descriptors_json: JSON.stringify(descriptors),
-      reference_images_json: JSON.stringify(imagePaths),
+      reference_images_json: serializeReferencesForStorage(imagePaths),
       enrolled_at: row.enrolled_at,
       updated_at: row.updated_at,
     });
@@ -128,6 +135,11 @@ async function upsertFaceProfileRow(record) {
     throw new Error("user_id is required for face profile persistence.");
   }
 
+  const reference_images_json =
+    typeof record.reference_images_json === "string"
+      ? record.reference_images_json
+      : serializeReferencesForStorage(record.reference_images_json);
+
   if (useMongoFaceStore()) {
     await assertMongoUserExists(id);
     const UserFaceProfile = require("../models/UserFaceProfile");
@@ -137,7 +149,7 @@ async function upsertFaceProfileRow(record) {
         $set: {
           user_id: id,
           descriptors_json: record.descriptors_json,
-          reference_images_json: record.reference_images_json,
+          reference_images_json,
           enrolled_at: record.enrolled_at,
           updated_at: record.updated_at,
         },
@@ -149,6 +161,7 @@ async function upsertFaceProfileRow(record) {
 
   ensureSqliteFaceProfilesTable();
   const db = getDb();
+  const payload = { ...record, reference_images_json };
   const existing = db
     .prepare(`SELECT user_id FROM user_face_profiles WHERE user_id = ?`)
     .get(id);
@@ -160,18 +173,26 @@ async function upsertFaceProfileRow(record) {
            reference_images_json = @reference_images_json,
            updated_at = @updated_at
        WHERE user_id = @user_id`
-    ).run(record);
+    ).run(payload);
   } else {
     db.prepare(
       `INSERT INTO user_face_profiles (user_id, descriptors_json, reference_images_json, enrolled_at, updated_at)
        VALUES (@user_id, @descriptors_json, @reference_images_json, @enrolled_at, @updated_at)`
-    ).run(record);
+    ).run(payload);
   }
 }
 
 async function deleteFaceProfileRow(userId) {
   const id = String(userId || "").trim();
   if (!id) return;
+
+  const row = await loadFaceProfileRow(id);
+  if (row?.reference_images_json) {
+    const refs = parseStoredReferences(row.reference_images_json);
+    await destroyReferenceAssets(refs);
+  }
+
+  purgeLegacyLocalFaceDirectory(id);
 
   if (useMongoFaceStore()) {
     const UserFaceProfile = require("../models/UserFaceProfile");
@@ -190,4 +211,7 @@ module.exports = {
   loadFaceProfileRow,
   upsertFaceProfileRow,
   deleteFaceProfileRow,
+  uploadReferenceImage,
+  parseStoredReferences,
+  serializeReferencesForStorage,
 };
