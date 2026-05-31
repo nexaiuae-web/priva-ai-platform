@@ -97,6 +97,23 @@ const documentSchema = new mongoose.Schema(
       default: false,
       index: true,
     },
+    storage_provider: {
+      type: String,
+      default: "local",
+      trim: true,
+      index: true,
+    },
+    cloudinary_public_id: {
+      type: String,
+      default: null,
+      trim: true,
+      index: true,
+    },
+    cloudinary_secure_url: {
+      type: String,
+      default: null,
+      trim: true,
+    },
     created_at: {
       type: Date,
       default: Date.now,

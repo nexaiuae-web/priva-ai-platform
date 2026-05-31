@@ -20,4 +20,5 @@ services:
       - key: EMBEDDING_PROVIDER
         value: openai
       # Set in Render dashboard (never commit secrets):
-      # MONGODB_URI, JWT_SECRET, OPENAI_API_KEY, CORS_ORIGIN, etc.
+      # MONGODB_URI, JWT_SECRET, OPENAI_API_KEY, CORS_ORIGIN,
+      # PRIVA_CLOUDINARY_CLOUD_NAME, PRIVA_CLOUDINARY_API_KEY, PRIVA_CLOUDINARY_API_SECRET, etc.

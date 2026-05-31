@@ -22,10 +22,13 @@ const uploadJobSchema = new mongoose.Schema(
     max_retries: { type: Number, default: 3 },
     is_trial: { type: Boolean, default: false },
     trial_fingerprint: { type: String, default: null },
+    storage_provider: { type: String, default: "local", index: true },
+    cloudinary_public_id: { type: String, default: null, index: true },
+    cloudinary_secure_url: { type: String, default: null },
     created_at: { type: Date, default: Date.now },
     updated_at: { type: Date, default: Date.now },
   },
-  { collection: "upload_jobs", versionKey: false, strict: true }
+  { collection: "upload_jobs", versionKey: false, strict: false }
 );
 
 uploadJobSchema.index({ company_id: 1, status: 1 });

@@ -10,6 +10,7 @@ const {
   saveDocumentForCompany,
 } = require("./admin");
 const { deleteByDocumentId } = require("./vectorStore");
+const { loadDocumentBufferForJob } = require("./cloudinaryDocumentStorage");
 const { preprocessImage } = require("./imageProcessor");
 const { extractTextFromImage } = require("./ocr");
 const { extractTextFromPdf } = require("./pdfExtractor");
@@ -86,8 +87,13 @@ async function processDocumentUploadJob(jobId) {
     throw new Error(`Upload job not found: ${jobId}`);
   }
 
-  if (!job.file_path || !fs.existsSync(job.file_path)) {
-    throw new Error("Staged upload file is missing on disk.");
+  const hasCloudinarySource =
+    String(job.storage_provider || "") === "cloudinary" &&
+    Boolean(String(job.cloudinary_public_id || "").trim());
+  const hasLocalSource = job.file_path && fs.existsSync(job.file_path);
+
+  if (!hasCloudinarySource && !hasLocalSource) {
+    throw new Error("Staged upload file is missing (no private Cloudinary asset or local path).");
   }
 
   if (!retrieverInstance) {
@@ -96,10 +102,14 @@ async function processDocumentUploadJob(jobId) {
 
   console.log("\n========== [BG-UPLOAD] PROCESSING START ==========");
   console.log("[BG-UPLOAD] Job:", jobId, "| file:", job.filename);
+  console.log(
+    "[BG-UPLOAD] Source:",
+    hasCloudinarySource ? "priva-cloudinary-private" : "local-disk"
+  );
 
   await pushJobProgress(jobId, "processing", { message: "Background processing started" });
 
-  const buffer = fs.readFileSync(job.file_path);
+  const buffer = await loadDocumentBufferForJob(job);
   const file = buildSyntheticFile(job, buffer);
   const mimeType = String(file.mimetype || "").toLowerCase();
   const isPdf = isPdfFile(file);
@@ -111,7 +121,11 @@ async function processDocumentUploadJob(jobId) {
     );
   }
 
-  await pushJobProgress(jobId, "received", { message: "File staged on server" });
+  await pushJobProgress(jobId, "received", {
+    message: hasCloudinarySource
+      ? "File loaded from private cloud storage"
+      : "File staged on server",
+  });
 
   const companyId = String(job.company_id || "").trim();
   const isTrialSandbox = companyId.startsWith("trial_");
@@ -235,6 +249,9 @@ async function processDocumentUploadJob(jobId) {
       upload_job_id: jobId,
       uploaded_by_user_id: job.user_id || null,
       folder_id: job.folder_id || null,
+      storage_provider: job.storage_provider || (job.cloudinary_public_id ? "cloudinary" : "local"),
+      cloudinary_public_id: job.cloudinary_public_id || null,
+      cloudinary_secure_url: job.cloudinary_secure_url || null,
     });
   } catch (error) {
     console.error("[BG-UPLOAD] Background processing error:", error.message);

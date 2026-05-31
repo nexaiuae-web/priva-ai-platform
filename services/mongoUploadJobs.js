@@ -15,6 +15,9 @@ function docToJob(doc) {
     filename: doc.filename,
     mime_type: doc.mime_type,
     file_path: doc.file_path,
+    storage_provider: doc.storage_provider || "local",
+    cloudinary_public_id: doc.cloudinary_public_id || null,
+    cloudinary_secure_url: doc.cloudinary_secure_url || null,
     file_size_bytes: doc.file_size_bytes,
     status: doc.status,
     percent: doc.percent,
@@ -63,6 +66,9 @@ async function createUploadJob(meta = {}) {
     max_retries: meta.max_retries ?? 3,
     is_trial: Boolean(meta.is_trial),
     trial_fingerprint: meta.trial_fingerprint || null,
+    storage_provider: meta.storage_provider || (meta.cloudinary_public_id ? "cloudinary" : "local"),
+    cloudinary_public_id: meta.cloudinary_public_id || null,
+    cloudinary_secure_url: meta.cloudinary_secure_url || null,
     created_at: now,
     updated_at: now,
   });
@@ -88,6 +94,13 @@ async function updateUploadJob(id, patch = {}) {
   };
 
   if (patch.file_path !== undefined) update.file_path = patch.file_path;
+  if (patch.storage_provider !== undefined) update.storage_provider = patch.storage_provider;
+  if (patch.cloudinary_public_id !== undefined) {
+    update.cloudinary_public_id = patch.cloudinary_public_id;
+  }
+  if (patch.cloudinary_secure_url !== undefined) {
+    update.cloudinary_secure_url = patch.cloudinary_secure_url;
+  }
   if (patch.user_id !== undefined) update.user_id = patch.user_id;
   if (patch.result !== undefined) update.result = patch.result;
 

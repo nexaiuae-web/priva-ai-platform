@@ -270,6 +270,16 @@ if (shouldUseOpenAIEmbeddings() || isOpenAIProvider()) {
 }
 console.log("[BOOT] CHROMA_EMBED_DIM:", EMBED_DIM_DEFAULT);
 {
+  const { isPrivaCloudinaryConfigured } = require("./services/cloudinaryDocumentStorage");
+  const privaCloud = String(process.env.PRIVA_CLOUDINARY_CLOUD_NAME || "").trim();
+  console.log(
+    "[BOOT] PRIVA Cloudinary documents:",
+    isPrivaCloudinaryConfigured()
+      ? `enabled (${privaCloud}, private raw)`
+      : "disabled (local upload staging only)"
+  );
+}
+{
   const mk = String(process.env.MASTER_KEY || "").trim();
   if (mk) {
     console.log("[BOOT] MASTER_KEY loaded: prefix", mk.slice(0, 10) + "…", "| length", mk.length, "chars");
@@ -585,6 +595,49 @@ async function acceptDocumentUploadCore(req, res) {
     }
   }
 
+  const {
+    isPrivaCloudinaryConfigured,
+    uploadDocumentFile,
+  } = require("./services/cloudinaryDocumentStorage");
+
+  let storageProvider = "local";
+  let cloudinaryPublicId = null;
+  let cloudinarySecureUrl = null;
+  let stagedFilePath = req.file.path;
+
+  if (isPrivaCloudinaryConfigured()) {
+    try {
+      console.log("[UPLOAD] Uploading to private Priva Cloudinary…");
+      const cloudAsset = await uploadDocumentFile({
+        filePath: req.file.path,
+        companyId: company.id,
+        uploadId,
+        filename: req.file.originalname,
+        mimeType: req.file.mimetype,
+      });
+      storageProvider = cloudAsset.storage_provider || "cloudinary";
+      cloudinaryPublicId = cloudAsset.public_id;
+      cloudinarySecureUrl = cloudAsset.secure_url;
+      discardStagedUploadFile(req);
+      stagedFilePath = null;
+      console.log("[UPLOAD] Private Cloudinary asset stored:", cloudinaryPublicId);
+    } catch (cloudError) {
+      discardStagedUploadFile(req);
+      console.error("[UPLOAD] Priva Cloudinary upload failed:", cloudError.message);
+      res.status(503).json({
+        error: "CLOUD_STORAGE_UPLOAD_FAILED",
+        code: "CLOUD_STORAGE_UPLOAD_FAILED",
+        message: "Secure cloud storage upload failed. Please try again.",
+        details: cloudError.message,
+      });
+      return;
+    }
+  } else {
+    console.warn(
+      "[UPLOAD] PRIVA_CLOUDINARY_* not configured — using ephemeral local staging (not for production)."
+    );
+  }
+
   await createUploadJob({
     id: uploadId,
     user_id: userId,
@@ -594,11 +647,17 @@ async function acceptDocumentUploadCore(req, res) {
     trial_fingerprint: trialMode ? getFingerprintFromRequest(req) : null,
     filename: req.file.originalname,
     mime_type: req.file.mimetype,
-    file_path: req.file.path,
+    file_path: stagedFilePath,
+    storage_provider: storageProvider,
+    cloudinary_public_id: cloudinaryPublicId,
+    cloudinary_secure_url: cloudinarySecureUrl,
     file_size_bytes: req.file.size,
     status: "processing",
     phase: "queued",
-    message: "File received — queued for background processing",
+    message:
+      storageProvider === "cloudinary"
+        ? "File secured in private cloud storage — queued for processing"
+        : "File received — queued for background processing",
     percent: 2,
   });
 

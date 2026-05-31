@@ -173,10 +173,21 @@ async function getCompanyById(companyId) {
 async function removeDocumentsByCompanyAndFilename(company_id, filename) {
   const companyId = String(company_id || "").trim();
   const name = String(filename || "").trim();
-  const docs = await Document.find({ company_id: companyId, filename: name }, { id: 1 }).lean();
+  const docs = await Document.find({ company_id: companyId, filename: name })
+    .select("id cloudinary_public_id storage_provider")
+    .lean();
   const removedIds = docs.map((d) => d.id);
   if (removedIds.length === 0) {
     return { removedDocumentIds: [] };
+  }
+
+  const { destroyDocumentStorageRecord } = require("./cloudinaryDocumentStorage");
+  for (const doc of docs) {
+    try {
+      await destroyDocumentStorageRecord(doc);
+    } catch (error) {
+      console.warn("[DOC-DELETE] Cloudinary cleanup failed:", doc.id, error.message);
+    }
   }
 
   await Document.deleteMany({ id: { $in: removedIds } });
@@ -341,6 +352,13 @@ async function deleteDocumentById(company_id, documentId) {
   const doc = await Document.findOneAndDelete({ id: docId, company_id: companyId }).lean();
   if (!doc) return null;
 
+  const { destroyDocumentStorageRecord } = require("./cloudinaryDocumentStorage");
+  try {
+    await destroyDocumentStorageRecord(doc);
+  } catch (error) {
+    console.warn("[DOC-DELETE] Cloudinary cleanup failed:", docId, error.message);
+  }
+
   await DocumentParent.deleteMany({ document_id: docId });
   return doc;
 }
@@ -401,6 +419,9 @@ async function saveDocumentForCompany({
   upload_job_id = null,
   uploaded_by_user_id = null,
   folder_id = null,
+  storage_provider = null,
+  cloudinary_public_id = null,
+  cloudinary_secure_url = null,
 }) {
   const normalizedCompanyId = String(company_id || "").trim();
   const isTrialSandbox = normalizedCompanyId.startsWith("trial_");
@@ -409,13 +430,27 @@ async function saveDocumentForCompany({
     Math.max(0, Number(raw_text_length) || 0) + Math.max(0, Number(cleaned_text_length) || 0);
 
   let userId = uploaded_by_user_id;
-  if (!userId && upload_job_id) {
+  let jobStorage = {
+    storage_provider: storage_provider || null,
+    cloudinary_public_id: cloudinary_public_id || null,
+    cloudinary_secure_url: cloudinary_secure_url || null,
+  };
+  if (upload_job_id) {
     try {
       const { getUploadJob } = require("./uploadJobs");
       const job = await getUploadJob(upload_job_id);
-      userId = job?.user_id || null;
+      if (!userId) {
+        userId = job?.user_id || null;
+      }
+      if (!jobStorage.cloudinary_public_id && job?.cloudinary_public_id) {
+        jobStorage = {
+          storage_provider: job.storage_provider || "cloudinary",
+          cloudinary_public_id: job.cloudinary_public_id,
+          cloudinary_secure_url: job.cloudinary_secure_url || null,
+        };
+      }
     } catch {
-      userId = null;
+      userId = userId || null;
     }
   }
 
@@ -453,6 +488,9 @@ async function saveDocumentForCompany({
     ocr_verification,
     file_size_bytes: incomingBytes,
     upload_job_id: upload_job_id || null,
+    storage_provider: jobStorage.storage_provider || "local",
+    cloudinary_public_id: jobStorage.cloudinary_public_id || null,
+    cloudinary_secure_url: jobStorage.cloudinary_secure_url || null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     status: "complete",
