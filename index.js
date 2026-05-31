@@ -72,6 +72,11 @@ const {
   listUsersForAdmin,
 } = require("./services/tenantStore");
 const { purgeWorkspaceUser, purgeCompanyWithUsers } = require("./services/userLifecycle");
+const {
+  forwardRouteError,
+  wrapRoute,
+  respondDocumentsList,
+} = require("./services/routeHandler");
 const { resolveCompanyId, resolveCompanyRecord } = require("./services/companyResolver");
 const { isImageUpload, isPdfUpload } = require("./services/fileType");
 const {
@@ -390,14 +395,7 @@ function forwardUploadHandlerError(res, next, error) {
   if (quotaResponse) {
     return quotaResponse;
   }
-  if (typeof next === "function") {
-    return next(error);
-  }
-  console.error("[UPLOAD] handler error (no next):", error.message);
-  return res.status(500).json({
-    error: "UPLOAD_FAILED",
-    message: error.message || "Upload failed.",
-  });
+  return forwardRouteError(res, next, error, "UPLOAD");
 }
 
 function buildStorageLimitPayload(storageError) {
@@ -661,110 +659,103 @@ function resolveFolderIdFromRequest(req) {
   return normalizeFolderId(raw);
 }
 
-async function listDocumentsHandler(req, res, next) {
-  try {
-    // CRITICAL: Free Trial must never reach premium/root company resolution below.
-    if (isTrialModeRequest(req)) {
-      const trialCompanyId = getTrialCompanyIdForRequest(req);
-      if (!isValidTrialCompanyId(trialCompanyId)) {
-        console.warn("[DOCUMENTS] TRIAL isolation — empty list (invalid sandbox id)", {
-          trialCompanyId: trialCompanyId ?? null,
-          fingerprint: getFingerprintFromRequest(req) ? "present" : "missing",
-          plan_mode: req.headers["x-plan-mode"] ?? null,
-        });
-        return res.json({ documents: [], files: [] });
-      }
-
-      attachTrialAuthContext(req, trialCompanyId);
-      const docs = await listDocumentsForTrialSandbox(trialCompanyId);
-      const payload = docs.map(serializeDocumentListItem);
-
-      console.log(
-        "[DOCUMENTS] TRIAL GET",
-        trialCompanyId,
-        "→",
-        payload.length,
-        "items (strict sandbox)"
-      );
-      return res.json(payload);
-    }
-
-    const companyId = await resolveCompanyId(req);
-    if (!companyId) {
-      return res.status(400).json({ error: "company_id could not be resolved." });
-    }
-
-    const scopeUserId = resolveWorkspaceDocumentUserScope(req);
-    const folder_id = resolveFolderIdFromRequest(req);
-
-    if (req.auth?.user && String(req.auth.user.role || "").toLowerCase() === "user" && !scopeUserId) {
-      return res.status(401).json({ error: "Authentication required." });
-    }
-
-    const company = await resolveCompanyRecord(companyId);
-    if (!company) {
-      return res.status(404).json({ error: "Company not found." });
-    }
-
-    if (folder_id) {
-      const { assertFolderAccess } = require("./services/folders");
-      await assertFolderAccess(folder_id, {
-        user_id: scopeUserId,
-        company_id: companyId,
+async function listDocumentsHandlerCore(req, res) {
+  // CRITICAL: Free Trial must never reach premium/root company resolution below.
+  if (isTrialModeRequest(req)) {
+    const trialCompanyId = getTrialCompanyIdForRequest(req);
+    if (!isValidTrialCompanyId(trialCompanyId)) {
+      console.warn("[DOCUMENTS] TRIAL isolation — empty list (invalid sandbox id)", {
+        trialCompanyId: trialCompanyId ?? null,
+        fingerprint: getFingerprintFromRequest(req) ? "present" : "missing",
+        plan_mode: req.headers["x-plan-mode"] ?? null,
       });
+      return respondDocumentsList(res, []);
     }
 
-    const docs = await listDocumentsByCompany(companyId, {
-      user_id: scopeUserId,
-      folder_id,
-    });
+    attachTrialAuthContext(req, trialCompanyId);
+    const docs = await listDocumentsForTrialSandbox(trialCompanyId);
     const payload = docs.map(serializeDocumentListItem);
 
     console.log(
-      "[DOCUMENTS] GET",
-      companyId,
-      "folder:",
-      folder_id || "(root)",
+      "[DOCUMENTS] TRIAL GET",
+      trialCompanyId,
       "→",
       payload.length,
-      "items"
+      "items (strict sandbox)"
     );
-    return res.json(payload);
-  } catch (err) {
-    if (err.message?.includes("Folder not found")) {
-      return res.status(404).json({ error: err.message });
-    }
-    return next(err);
+    return respondDocumentsList(res, payload);
   }
-}
 
-async function listFoldersHandler(req, res, next) {
-  try {
-    if (isTrialModeRequest(req)) {
-      return res.json({ folders: [] });
-    }
+  const companyId = await resolveCompanyId(req);
+  if (!companyId) {
+    return res.status(400).json({ error: "company_id could not be resolved." });
+  }
 
-    const companyId = await resolveDocumentsCompanyId(req);
-    if (!companyId && isTrialModeRequest(req)) {
-      return respondMissingTrialFingerprint(res);
-    }
-    const scopeUserId = resolveWorkspaceDocumentUserScope(req);
+  const scopeUserId = resolveWorkspaceDocumentUserScope(req);
+  const folder_id = resolveFolderIdFromRequest(req);
 
-    if (!scopeUserId) {
-      return res.status(401).json({ error: "Authentication required." });
-    }
+  if (req.auth?.user && String(req.auth.user.role || "").toLowerCase() === "user" && !scopeUserId) {
+    return res.status(401).json({ error: "Authentication required." });
+  }
 
-    const { listFoldersForUser } = require("./services/folders");
-    const folders = await listFoldersForUser({
+  const company = await resolveCompanyRecord(companyId);
+  if (!company) {
+    return res.status(404).json({ error: "Company not found." });
+  }
+
+  if (folder_id) {
+    const { assertFolderAccess } = require("./services/folders");
+    await assertFolderAccess(folder_id, {
       user_id: scopeUserId,
       company_id: companyId,
     });
-
-    return res.json({ folders });
-  } catch (err) {
-    return next(err);
   }
+
+  const docs = await listDocumentsByCompany(companyId, {
+    user_id: scopeUserId,
+    folder_id,
+  });
+  const payload = docs.map(serializeDocumentListItem);
+
+  console.log(
+    "[DOCUMENTS] GET",
+    companyId,
+    "folder:",
+    folder_id || "(root)",
+    "→",
+    payload.length,
+    "items"
+  );
+  return respondDocumentsList(res, payload);
 }
+
+const listDocumentsHandler = wrapRoute(listDocumentsHandlerCore, "DOCUMENTS");
+
+async function listFoldersHandlerCore(req, res) {
+  if (isTrialModeRequest(req)) {
+    return res.status(200).json({ folders: [] });
+  }
+
+  const companyId = await resolveDocumentsCompanyId(req);
+  if (!companyId && isTrialModeRequest(req)) {
+    return respondMissingTrialFingerprint(res);
+  }
+  const scopeUserId = resolveWorkspaceDocumentUserScope(req);
+
+  if (!scopeUserId) {
+    return res.status(401).json({ error: "Authentication required." });
+  }
+
+  const { listFoldersForUser } = require("./services/folders");
+  const folders = await listFoldersForUser({
+    user_id: scopeUserId,
+    company_id: companyId,
+  });
+
+  return res.status(200).json({ folders });
+}
+
+const listFoldersHandler = wrapRoute(listFoldersHandlerCore, "FOLDERS");
 
 async function createFolderHandler(req, res, next) {
   try {
@@ -1488,81 +1479,77 @@ async function uploadStatusHandler(req, res) {
   return res.json(serializeUploadJob(job));
 }
 
-async function listActiveUploadsHandler(req, res, next) {
-  try {
-    if (isTrialModeRequest(req)) {
-      const trialCompanyId = getTrialCompanyIdForRequest(req);
-      if (!isValidTrialCompanyId(trialCompanyId)) {
-        return res.json({ uploads: [] });
-      }
-      attachTrialAuthContext(req, trialCompanyId);
-      const jobs = await listUploadJobsByCompany(trialCompanyId, { activeOnly: true });
-      return res.json({
-        uploads: jobs.map(serializeUploadJob),
-      });
+async function listActiveUploadsHandlerCore(req, res) {
+  if (isTrialModeRequest(req)) {
+    const trialCompanyId = getTrialCompanyIdForRequest(req);
+    if (!isValidTrialCompanyId(trialCompanyId)) {
+      return res.status(200).json({ uploads: [] });
     }
-
-    const companyId = await resolveCompanyId(req);
-    if (!companyId) {
-      return res.json({ uploads: [] });
-    }
-    const scopeUserId = resolveWorkspaceDocumentUserScope(req);
-    const jobs = await listUploadJobsByCompany(companyId, {
-      activeOnly: true,
-      user_id: scopeUserId,
-    });
-    return res.json({
+    attachTrialAuthContext(req, trialCompanyId);
+    const jobs = await listUploadJobsByCompany(trialCompanyId, { activeOnly: true });
+    return res.status(200).json({
       uploads: jobs.map(serializeUploadJob),
     });
-  } catch (error) {
-    return next(error);
   }
+
+  const companyId = await resolveCompanyId(req);
+  if (!companyId) {
+    return res.status(200).json({ uploads: [] });
+  }
+  const scopeUserId = resolveWorkspaceDocumentUserScope(req);
+  const jobs = await listUploadJobsByCompany(companyId, {
+    activeOnly: true,
+    user_id: scopeUserId,
+  });
+  return res.status(200).json({
+    uploads: jobs.map(serializeUploadJob),
+  });
 }
+
+const listActiveUploadsHandler = wrapRoute(listActiveUploadsHandlerCore, "UPLOADS");
 
 uploadRouter.get("/status/:jobId", uploadStatusHandler);
 
-async function companyStorageHandler(req, res, next) {
-  try {
-    if (isTrialModeRequest(req)) {
-      const trialCompanyId = getTrialCompanyIdForRequest(req);
-      if (!isValidTrialCompanyId(trialCompanyId)) {
-        return res.json({
-          storage_pool_scope: "trial",
-          storage_used_mb: 0,
-          storage_committed_mb: 0,
-          storage_reserved_mb: 0,
-          storage_remaining_mb: 5,
-          storage_limit_mb: 5,
-        });
-      }
-      const status = await getTrialStatusFromRequest(req);
-      const usedBytes = status.trial?.storage_used_bytes ?? 0;
-      const limitBytes = status.trial?.storage_limit_bytes ?? 5 * 1024 * 1024;
-      return res.json({
+async function companyStorageHandlerCore(req, res) {
+  if (isTrialModeRequest(req)) {
+    const trialCompanyId = getTrialCompanyIdForRequest(req);
+    if (!isValidTrialCompanyId(trialCompanyId)) {
+      return res.status(200).json({
         storage_pool_scope: "trial",
-        storage_used_mb: Math.round((usedBytes / (1024 * 1024)) * 100) / 100,
+        storage_used_mb: 0,
         storage_committed_mb: 0,
         storage_reserved_mb: 0,
-        storage_remaining_mb:
-          Math.round(((limitBytes - usedBytes) / (1024 * 1024)) * 100) / 100,
+        storage_remaining_mb: 5,
         storage_limit_mb: 5,
       });
     }
-
-    const companyId = await resolveCompanyId(req);
-    const company = await resolveCompanyRecord(companyId);
-    if (!company) {
-      return res.status(404).json({ error: "Company not found." });
-    }
-    const snapshot = await getTenantStorageSnapshot(company.id);
-    if (!snapshot) {
-      return res.status(404).json({ error: "Company not found." });
-    }
-    return res.json(snapshot);
-  } catch (error) {
-    return next(error);
+    const status = await getTrialStatusFromRequest(req);
+    const usedBytes = status.trial?.storage_used_bytes ?? 0;
+    const limitBytes = status.trial?.storage_limit_bytes ?? 5 * 1024 * 1024;
+    return res.status(200).json({
+      storage_pool_scope: "trial",
+      storage_used_mb: Math.round((usedBytes / (1024 * 1024)) * 100) / 100,
+      storage_committed_mb: 0,
+      storage_reserved_mb: 0,
+      storage_remaining_mb:
+        Math.round(((limitBytes - usedBytes) / (1024 * 1024)) * 100) / 100,
+      storage_limit_mb: 5,
+    });
   }
+
+  const companyId = await resolveCompanyId(req);
+  const company = await resolveCompanyRecord(companyId);
+  if (!company) {
+    return res.status(404).json({ error: "Company not found." });
+  }
+  const snapshot = await getTenantStorageSnapshot(company.id);
+  if (!snapshot) {
+    return res.status(404).json({ error: "Company not found." });
+  }
+  return res.status(200).json(snapshot);
 }
+
+const companyStorageHandler = wrapRoute(companyStorageHandlerCore, "STORAGE");
 
 documentsRouter.get("/storage", companyStorageHandler);
 documentsRouter.get("/", listDocumentsHandler);
@@ -2095,14 +2082,13 @@ chatRouter.post("/", async (req, res, next) => {
   }
 });
 
-apiRouter.get("/trial/status", async (req, res, next) => {
-  try {
+apiRouter.get(
+  "/trial/status",
+  wrapRoute(async (req, res) => {
     const status = await getTrialStatusFromRequest(req);
-    return res.json(status);
-  } catch (error) {
-    return next(error);
-  }
-});
+    return res.status(200).json(status);
+  }, "TRIAL_STATUS")
+);
 
 apiRouter.post("/login", loginHandler);
 
@@ -2260,7 +2246,12 @@ app.use((error, _req, res, _next) => {
     return res.status(400).json({ error: message });
   }
 
-  return res.status(500).json({ error: "Unexpected server error.", details: message });
+  return res.status(500).json({
+    error: message,
+    message,
+    code: error?.code || "INTERNAL_ERROR",
+    details: message,
+  });
 });
 
 (async () => {
