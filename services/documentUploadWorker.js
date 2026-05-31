@@ -204,36 +204,45 @@ async function processDocumentUploadJob(jobId) {
     throw new Error("Chunking failed: no chunks generated.");
   }
 
-  pushJobProgress(jobId, "saving", { message: "Saving document to database…" });
+  await pushJobProgress(jobId, "saving", { message: "Saving document to database…" });
 
-  const { removedDocumentIds } = await removeDocumentsByCompanyAndFilename(
-    company.id,
-    file.originalname
-  );
-  for (const rid of removedDocumentIds) {
-    try {
-      await deleteByDocumentId(rid);
-    } catch (e) {
-      console.warn("[BG-UPLOAD] Chroma cleanup:", e.message);
+  let document;
+  try {
+    const { removedDocumentIds } = await removeDocumentsByCompanyAndFilename(
+      company.id,
+      file.originalname
+    );
+    for (const rid of removedDocumentIds) {
+      try {
+        await deleteByDocumentId(rid);
+      } catch (e) {
+        console.warn("[BG-UPLOAD] Chroma cleanup:", e.message);
+      }
     }
-  }
 
-  const document = await saveDocumentForCompany({
-    company_id: company.id,
-    filename: file.originalname,
-    mime_type: file.mimetype,
-    chunks,
-    raw_ocr_text: rawText,
-    cleaned_text: cleanedText,
-    raw_text_length: rawText.length,
-    cleaned_text_length: cleanedText.length,
-    detected_document_type: detectedType,
-    ocr_verification: ocrVerification,
-    file_size_bytes: file.size,
-    upload_job_id: jobId,
-    uploaded_by_user_id: job.user_id || null,
-    folder_id: job.folder_id || null,
-  });
+    document = await saveDocumentForCompany({
+      company_id: company.id,
+      filename: file.originalname,
+      mime_type: file.mimetype,
+      chunks,
+      raw_ocr_text: rawText,
+      cleaned_text: cleanedText,
+      raw_text_length: rawText.length,
+      cleaned_text_length: cleanedText.length,
+      detected_document_type: detectedType,
+      ocr_verification: ocrVerification,
+      file_size_bytes: file.size,
+      upload_job_id: jobId,
+      uploaded_by_user_id: job.user_id || null,
+      folder_id: job.folder_id || null,
+    });
+  } catch (error) {
+    console.error("[BG-UPLOAD] Background processing error:", error.message);
+    if (error?.stack) {
+      console.error(error.stack);
+    }
+    throw error;
+  }
 
   let ragStats = { parentsStored: 0, childrenIndexed: 0, totalChunks: 0 };
   try {

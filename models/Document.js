@@ -117,9 +117,8 @@ const documentSchema = new mongoose.Schema(
 documentSchema.index({ company_id: 1, filename: 1, created_at: -1 });
 documentSchema.index({ company_id: 1, folder_id: 1, created_at: -1 });
 
-documentSchema.pre("save", function syncUpdatedAt(next) {
+documentSchema.pre("save", function syncUpdatedAt() {
   this.updated_at = new Date();
-  next();
 });
 
 module.exports = mongoose.models.Document || mongoose.model("Document", documentSchema);

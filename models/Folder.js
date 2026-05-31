@@ -46,9 +46,8 @@ const folderSchema = new mongoose.Schema(
 
 folderSchema.index({ user_id: 1, company_id: 1, name: 1 }, { unique: true });
 
-folderSchema.pre("save", function syncUpdatedAt(next) {
+folderSchema.pre("save", function syncUpdatedAt() {
   this.updated_at = new Date();
-  next();
 });
 
 module.exports = mongoose.models.Folder || mongoose.model("Folder", folderSchema);

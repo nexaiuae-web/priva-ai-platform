@@ -459,8 +459,22 @@ async function saveDocumentForCompany({
     vector_indexed: false,
   };
 
-  await Document.create(documentRecord);
-  return documentRecord;
+  try {
+    await Document.create(documentRecord);
+    console.log("[DOC-SAVE] MongoDB document created", {
+      id: documentRecord.id,
+      company_id: documentRecord.company_id,
+      filename: documentRecord.filename,
+      upload_job_id: documentRecord.upload_job_id,
+    });
+    return documentRecord;
+  } catch (error) {
+    console.error("[DOC-SAVE] MongoDB create failed:", error.message);
+    if (error?.stack) {
+      console.error(error.stack);
+    }
+    throw error;
+  }
 }
 
 module.exports = {
