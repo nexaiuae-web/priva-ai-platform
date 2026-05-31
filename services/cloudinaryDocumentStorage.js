@@ -4,7 +4,7 @@
  */
 const fs = require("fs");
 const path = require("path");
-const fetch = require("node-fetch");
+const axios = require("axios");
 const cloudinary = require("cloudinary").v2;
 
 const DOCUMENT_FOLDER_PREFIX =
@@ -145,14 +145,49 @@ async function uploadDocumentFile({
 }
 
 async function fetchBufferFromSignedUrl(signedUrl) {
-  const response = await fetch(signedUrl);
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
+  const url = String(signedUrl || "").trim();
+  if (!url) {
+    throw new Error("Signed Cloudinary download URL is missing.");
+  }
+
+  try {
+    const response = await axios.get(url, {
+      responseType: "arraybuffer",
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+      timeout: Math.max(
+        30_000,
+        Number.parseInt(process.env.PRIVA_CLOUDINARY_DOWNLOAD_TIMEOUT_MS || "120000", 10) || 120_000
+      ),
+      validateStatus: (status) => status >= 200 && status < 300,
+    });
+
+    const buffer = Buffer.isBuffer(response.data)
+      ? response.data
+      : Buffer.from(response.data || []);
+
+    if (!buffer.length) {
+      throw new Error("Private Cloudinary download returned an empty file.");
+    }
+
+    return buffer;
+  } catch (error) {
+    const status = error.response?.status;
+    let detail = error.message || "download failed";
+    if (error.response?.data) {
+      try {
+        const snippet = Buffer.isBuffer(error.response.data)
+          ? error.response.data.toString("utf8", 0, 200)
+          : String(error.response.data).slice(0, 200);
+        if (snippet) detail = `${detail} — ${snippet}`;
+      } catch {
+        /* ignore body parse errors */
+      }
+    }
     throw new Error(
-      `Private Cloudinary download failed (${response.status}): ${body.slice(0, 200)}`
+      `Private Cloudinary download failed${status ? ` (${status})` : ""}: ${detail}`
     );
   }
-  return Buffer.from(await response.arrayBuffer());
 }
 
 /**
