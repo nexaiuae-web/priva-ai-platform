@@ -25,6 +25,8 @@ const {
   embedText: embedTextProvider,
   embedTexts,
   getEmbeddingProvider,
+  getEffectiveEmbeddingProvider,
+  shouldUseOpenAIEmbeddings,
   isOpenAIProvider,
   getOpenAIEmbedModel,
   getConfiguredEmbedDim,
@@ -720,13 +722,15 @@ class ArabicParentDocumentRetriever {
     this.resolveApiKey = options.resolveApiKey || (async () => null);
     this._expectedEmbedDim = null;
 
-    const provider = getEmbeddingProvider();
-    if (isOpenAIProvider()) {
+    const provider = getEffectiveEmbeddingProvider();
+    if (shouldUseOpenAIEmbeddings() || isOpenAIProvider()) {
       console.log(
         "[RETRIEVER] Initialized (OpenAI embeddings):",
         getOpenAIEmbedModel(),
         "| dim:",
-        getConfiguredEmbedDim()
+        getConfiguredEmbedDim(),
+        "| env:",
+        provider
       );
     } else {
       console.log(
@@ -763,14 +767,14 @@ class ArabicParentDocumentRetriever {
     return this._expectedEmbedDim;
   }
 
-  async embedText(text, _apiKey = null) {
+  async embedText(text, _apiKey = null, options = {}) {
     await this.getExpectedEmbedDim();
-    return embedTextProvider(text);
+    return embedTextProvider(text, options);
   }
 
-  async embedTexts(texts) {
+  async embedTexts(texts, onProgress, options = {}) {
     await this.getExpectedEmbedDim();
-    return embedTexts(texts);
+    return embedTexts(texts, onProgress, options);
   }
 
   async indexDocument({
@@ -795,12 +799,15 @@ class ArabicParentDocumentRetriever {
           ? String(existingDoc.folder_id)
           : "";
 
+    const embedOpts = { isTrial: companyIdStr.startsWith("trial_") };
+
     console.log("[INDEX] start", {
       document_id,
       company_id: companyIdStr,
       folder_id: folderIdStr || null,
       uploaded_by_user_id: uploaderIdStr || null,
-      provider: getEmbeddingProvider(),
+      provider: getEffectiveEmbeddingProvider(embedOpts),
+      is_trial: embedOpts.isTrial,
     });
 
     const parents = this.splitIntoParents(text, 2000);
@@ -846,7 +853,7 @@ class ArabicParentDocumentRetriever {
 
       for (let c = 0; c < children.length; c++) {
         const child = children[c];
-        const embedding = await embedTextProvider(child);
+        const embedding = await embedTextProvider(child, embedOpts);
         if (embedding.length !== expectedDim) {
           throw new Error(
             `Embedding dimension ${embedding.length} does not match CHROMA_EMBED_DIM=${expectedDim}`

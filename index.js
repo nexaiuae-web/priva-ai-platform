@@ -174,9 +174,11 @@ async function retrieveContextsViaChromaNative(
   fetchN,
   { user_id = null, folder_id = null } = {}
 ) {
-  const { getEmbeddingProvider } = require("./services/embeddings");
+  const { getEffectiveEmbeddingProvider } = require("./services/embeddings");
+  const isTrial = String(companyId || "").startsWith("trial_");
+  const embedOpts = { isTrial };
   console.log(
-    `[RAG] ${getEmbeddingProvider()} embeddings + Chroma | company_id=${companyId}, user_id=${user_id || "(company)"}, folder_id=${folder_id || "(root)"}, topK=${topK}, fetchN=${fetchN}, question="${question.substring(0, 60)}..."`
+    `[RAG] ${getEffectiveEmbeddingProvider(embedOpts)} embeddings + Chroma | company_id=${companyId}, user_id=${user_id || "(company)"}, folder_id=${folder_id || "(root)"}, topK=${topK}, fetchN=${fetchN}, question="${question.substring(0, 60)}..."`
   );
 
   return retrieveForChat({
@@ -186,7 +188,7 @@ async function retrieveContextsViaChromaNative(
     folder_id,
     topK,
     fetchN,
-    embedText: (text) => retriever.embedText(text),
+    embedText: (text) => retriever.embedText(text, null, embedOpts),
   });
 }
 
@@ -238,10 +240,14 @@ console.log("[BOOT] Chroma: local embedded only | persist:", CHROMA_DATA_DIR);
 const { getChatModel, getPrimaryEmbedModel, EMBED_DIM_DEFAULT } = require("./services/ollamaConfig");
 const {
   getEmbeddingProvider,
+  getEffectiveEmbeddingProvider,
+  shouldUseOpenAIEmbeddings,
   isOpenAIProvider,
   getOpenAIEmbedModel,
+  hasOpenAIKey,
 } = require("./services/embeddings");
 console.log("[BOOT] OLLAMA_URL:", process.env.OLLAMA_URL || "http://127.0.0.1:11434");
+console.log("[BOOT] RENDER:", isRenderPlatform() ? "yes (cloud embeddings → OpenAI when key set)" : "no");
 console.log("[BOOT] CHAT_PROVIDER:", getChatProvider());
 if (isOpenAIChatEnabled()) {
   console.log("[BOOT] OPENAI_CHAT_MODEL:", getOpenAIChatModel());
@@ -250,11 +256,15 @@ if (isOpenAIChatEnabled()) {
 } else {
   console.log("[BOOT] OLLAMA_CHAT_MODEL:", getChatModel());
 }
-console.log("[BOOT] EMBEDDING_PROVIDER:", getEmbeddingProvider());
-if (isOpenAIProvider()) {
+console.log("[BOOT] EMBEDDING_PROVIDER (env):", getEmbeddingProvider());
+console.log("[BOOT] EMBEDDING effective:", getEffectiveEmbeddingProvider());
+if (shouldUseOpenAIEmbeddings() || isOpenAIProvider()) {
   const oaKey = String(process.env.OPENAI_API_KEY || "").trim();
   console.log("[BOOT] OPENAI_EMBED_MODEL:", getOpenAIEmbedModel());
-  console.log("[BOOT] OPENAI_API_KEY:", oaKey ? `set (${oaKey.slice(0, 7)}…)` : "NOT SET");
+  console.log("[BOOT] OPENAI_API_KEY (embed):", oaKey ? `set (${oaKey.slice(0, 7)}…)` : "NOT SET");
+  if (!hasOpenAIKey()) {
+    console.warn("[BOOT] ⚠️ Cloud deployment needs OPENAI_API_KEY for embeddings.");
+  }
 } else {
   console.log("[BOOT] OLLAMA_EMBED_MODEL:", getPrimaryEmbedModel());
 }
