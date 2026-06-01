@@ -81,6 +81,30 @@ function getDb() {
   if (!userColumnNames.has("storage_limit_mb")) {
     db.exec(`ALTER TABLE users ADD COLUMN storage_limit_mb INTEGER`);
   }
+  if (!columnNames.has("monthly_question_limit")) {
+    db.exec(
+      `ALTER TABLE companies ADD COLUMN monthly_question_limit INTEGER NOT NULL DEFAULT 500`
+    );
+  }
+  if (!columnNames.has("current_month_question_count")) {
+    db.exec(
+      `ALTER TABLE companies ADD COLUMN current_month_question_count INTEGER NOT NULL DEFAULT 0`
+    );
+  }
+  if (!columnNames.has("question_quota_month")) {
+    db.exec(`ALTER TABLE companies ADD COLUMN question_quota_month TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!userColumnNames.has("monthly_question_limit")) {
+    db.exec(`ALTER TABLE users ADD COLUMN monthly_question_limit INTEGER`);
+  }
+  if (!userColumnNames.has("current_month_question_count")) {
+    db.exec(
+      `ALTER TABLE users ADD COLUMN current_month_question_count INTEGER NOT NULL DEFAULT 0`
+    );
+  }
+  if (!userColumnNames.has("question_quota_month")) {
+    db.exec(`ALTER TABLE users ADD COLUMN question_quota_month TEXT NOT NULL DEFAULT ''`);
+  }
 
   return db;
 }

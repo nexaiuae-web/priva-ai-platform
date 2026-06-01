@@ -6,6 +6,15 @@ const BCRYPT_ROUNDS = 10;
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "password123";
 const DEFAULT_COMPANY_NAME = "Default Company";
+const {
+  getDefaultMonthlyQuestionLimit,
+  parseMonthlyQuestionLimitInput,
+} = require("./questionQuota");
+
+function currentQuotaMonth() {
+  const now = new Date();
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+}
 
 function mapCompanyRow(row) {
   if (!row) return null;
@@ -14,6 +23,11 @@ function mapCompanyRow(row) {
     company_name: row.company_name,
     openai_api_key: row.openai_api_key || "",
     storage_limit_mb: Number(row.storage_limit_mb ?? 512),
+    monthly_question_limit: Number(
+      row.monthly_question_limit ?? getDefaultMonthlyQuestionLimit()
+    ),
+    current_month_question_count: Number(row.current_month_question_count ?? 0),
+    question_quota_month: row.question_quota_month || "",
     max_users: Number(row.max_users ?? 10),
     status: row.status || "active",
     created_at: row.created_at,
@@ -32,6 +46,12 @@ function mapUserRow(row) {
       row.storage_limit_mb == null || row.storage_limit_mb === ""
         ? null
         : Number(row.storage_limit_mb),
+    monthly_question_limit:
+      row.monthly_question_limit == null || row.monthly_question_limit === ""
+        ? null
+        : Number(row.monthly_question_limit),
+    current_month_question_count: Number(row.current_month_question_count ?? 0),
+    question_quota_month: row.question_quota_month || "",
     created_at: row.created_at,
   };
 }
@@ -46,6 +66,11 @@ function publicUser(user) {
       user.storage_limit_mb == null || user.storage_limit_mb === ""
         ? null
         : Number(user.storage_limit_mb),
+    monthly_question_limit:
+      user.monthly_question_limit == null || user.monthly_question_limit === ""
+        ? null
+        : Number(user.monthly_question_limit),
+    current_month_question_count: Number(user.current_month_question_count ?? 0),
     created_at: user.created_at,
   };
 }
@@ -126,6 +151,7 @@ function createCompany({
   company_name,
   openai_api_key = "",
   storage_limit_mb = 512,
+  monthly_question_limit = undefined,
   status = "active",
 }) {
   const name = String(company_name || "").trim();
@@ -134,7 +160,9 @@ function createCompany({
   }
 
   const storageMb = Math.max(1, Number.parseInt(storage_limit_mb, 10) || 512);
+  const questionLimit = parseMonthlyQuestionLimitInput(monthly_question_limit);
   const companyStatus = String(status || "active").trim() || "active";
+  const quotaMonth = currentQuotaMonth();
 
   const db = getDb();
   const company = {
@@ -142,14 +170,17 @@ function createCompany({
     company_name: name,
     openai_api_key: String(openai_api_key || "").trim(),
     storage_limit_mb: storageMb,
+    monthly_question_limit: questionLimit,
+    current_month_question_count: 0,
+    question_quota_month: quotaMonth,
     max_users: 10,
     status: companyStatus,
     created_at: new Date().toISOString(),
   };
 
   db.prepare(
-    `INSERT INTO companies (id, company_name, openai_api_key, storage_limit_mb, max_users, status, created_at)
-     VALUES (@id, @company_name, @openai_api_key, @storage_limit_mb, @max_users, @status, @created_at)`
+    `INSERT INTO companies (id, company_name, openai_api_key, storage_limit_mb, monthly_question_limit, current_month_question_count, question_quota_month, max_users, status, created_at)
+     VALUES (@id, @company_name, @openai_api_key, @storage_limit_mb, @monthly_question_limit, @current_month_question_count, @question_quota_month, @max_users, @status, @created_at)`
   ).run(company);
 
   return company;
@@ -161,6 +192,7 @@ function createUser({
   company_id,
   role = "user",
   storage_limit_mb = undefined,
+  monthly_question_limit = undefined,
 }) {
   const uname = String(username || "").trim();
   const companyId = String(company_id || "").trim();
@@ -194,6 +226,15 @@ function createUser({
     resolvedStorageMb = parseUserStorageLimitMb(storage_limit_mb, companyId);
   }
 
+  let resolvedQuestionLimit = null;
+  if (
+    monthly_question_limit !== undefined &&
+    monthly_question_limit !== null &&
+    monthly_question_limit !== ""
+  ) {
+    resolvedQuestionLimit = parseMonthlyQuestionLimitInput(monthly_question_limit);
+  }
+
   const user = {
     id: `usr_${crypto.randomBytes(6).toString("hex")}`,
     username: uname,
@@ -201,18 +242,21 @@ function createUser({
     company_id: companyId,
     role: userRole,
     storage_limit_mb: resolvedStorageMb,
+    monthly_question_limit: resolvedQuestionLimit,
+    current_month_question_count: 0,
+    question_quota_month: currentQuotaMonth(),
     created_at: new Date().toISOString(),
   };
 
   db.prepare(
-    `INSERT INTO users (id, username, password_hash, company_id, role, storage_limit_mb, created_at)
-     VALUES (@id, @username, @password_hash, @company_id, @role, @storage_limit_mb, @created_at)`
+    `INSERT INTO users (id, username, password_hash, company_id, role, storage_limit_mb, monthly_question_limit, current_month_question_count, question_quota_month, created_at)
+     VALUES (@id, @username, @password_hash, @company_id, @role, @storage_limit_mb, @monthly_question_limit, @current_month_question_count, @question_quota_month, @created_at)`
   ).run(user);
 
   return publicUser(user);
 }
 
-function updateUserById(userId, { storage_limit_mb } = {}) {
+function updateUserById(userId, { storage_limit_mb, monthly_question_limit } = {}) {
   const id = String(userId || "").trim();
   if (!id) {
     throw new Error("User id is required.");
@@ -223,27 +267,54 @@ function updateUserById(userId, { storage_limit_mb } = {}) {
     return null;
   }
 
-  if (storage_limit_mb === undefined) {
+  if (storage_limit_mb === undefined && monthly_question_limit === undefined) {
     return publicUser(existing);
   }
 
-  if (existing.role !== "user") {
-    throw new Error("Storage quota applies only to workspace users.");
+  const db = getDb();
+  const patch = { id };
+
+  if (storage_limit_mb !== undefined) {
+    if (existing.role !== "user") {
+      throw new Error("Storage quota applies only to workspace users.");
+    }
+    patch.storage_limit_mb = parseUserStorageLimitMb(storage_limit_mb, existing.company_id, {
+      excludeUserId: id,
+    });
   }
 
-  const resolved = parseUserStorageLimitMb(storage_limit_mb, existing.company_id, {
-    excludeUserId: id,
-  });
+  if (monthly_question_limit !== undefined) {
+    if (
+      monthly_question_limit === null ||
+      monthly_question_limit === ""
+    ) {
+      patch.monthly_question_limit = null;
+    } else {
+      patch.monthly_question_limit = parseMonthlyQuestionLimitInput(monthly_question_limit);
+    }
+  }
 
-  const db = getDb();
-  db.prepare(`UPDATE users SET storage_limit_mb = @storage_limit_mb WHERE id = @id`).run({
-    id,
-    storage_limit_mb: resolved,
-  });
+  const sets = [];
+  if (patch.storage_limit_mb !== undefined) {
+    sets.push("storage_limit_mb = @storage_limit_mb");
+  }
+  if (patch.monthly_question_limit !== undefined) {
+    sets.push("monthly_question_limit = @monthly_question_limit");
+  }
+  if (!sets.length) {
+    return publicUser(existing);
+  }
+
+  db.prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = @id`).run(patch);
 
   return publicUser({
     ...existing,
-    storage_limit_mb: resolved,
+    ...(patch.storage_limit_mb !== undefined
+      ? { storage_limit_mb: patch.storage_limit_mb }
+      : {}),
+    ...(patch.monthly_question_limit !== undefined
+      ? { monthly_question_limit: patch.monthly_question_limit }
+      : {}),
   });
 }
 
@@ -321,7 +392,7 @@ function getTenantMetrics() {
   };
 }
 
-function updateCompanyLimits(companyId, { storage_limit_mb }) {
+function updateCompanyLimits(companyId, { storage_limit_mb, monthly_question_limit } = {}) {
   const id = String(companyId || "").trim();
   if (!id) {
     throw new Error("Company id is required.");
@@ -332,20 +403,43 @@ function updateCompanyLimits(companyId, { storage_limit_mb }) {
     return null;
   }
 
-  if (storage_limit_mb === undefined || storage_limit_mb === null || storage_limit_mb === "") {
-    throw new Error("storage_limit_mb is required.");
-  }
-
-  const parsed = Number.parseInt(storage_limit_mb, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    throw new Error("storage_limit_mb must be a positive integer.");
+  if (
+    (storage_limit_mb === undefined || storage_limit_mb === null || storage_limit_mb === "") &&
+    (monthly_question_limit === undefined ||
+      monthly_question_limit === null ||
+      monthly_question_limit === "")
+  ) {
+    throw new Error("storage_limit_mb or monthly_question_limit is required.");
   }
 
   const db = getDb();
-  db.prepare(`UPDATE companies SET storage_limit_mb = @storage_limit_mb WHERE id = @id`).run({
-    id,
-    storage_limit_mb: parsed,
-  });
+  const patch = { id };
+
+  if (storage_limit_mb !== undefined && storage_limit_mb !== null && storage_limit_mb !== "") {
+    const parsed = Number.parseInt(storage_limit_mb, 10);
+    if (!Number.isFinite(parsed) || parsed < 1) {
+      throw new Error("storage_limit_mb must be a positive integer.");
+    }
+    patch.storage_limit_mb = parsed;
+  }
+
+  if (
+    monthly_question_limit !== undefined &&
+    monthly_question_limit !== null &&
+    monthly_question_limit !== ""
+  ) {
+    patch.monthly_question_limit = parseMonthlyQuestionLimitInput(monthly_question_limit);
+  }
+
+  const sets = [];
+  if (patch.storage_limit_mb !== undefined) {
+    sets.push("storage_limit_mb = @storage_limit_mb");
+  }
+  if (patch.monthly_question_limit !== undefined) {
+    sets.push("monthly_question_limit = @monthly_question_limit");
+  }
+
+  db.prepare(`UPDATE companies SET ${sets.join(", ")} WHERE id = @id`).run(patch);
 
   const userCount = countUsersByCompanyId(id);
   return {

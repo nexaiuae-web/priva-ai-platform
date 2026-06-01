@@ -101,6 +101,12 @@ const {
   parseSanitizedRequestHistory,
 } = require("./services/chatHistory");
 const { streamChatCompletion } = require("./services/llm");
+const { runQueuedLlmTask } = require("./services/llmQueue");
+const {
+  assertMonthlyQuestionQuotaAllowed,
+  incrementQuestionQuotaCounter,
+  attachQuestionQuotaToSnapshot,
+} = require("./services/questionQuota");
 const {
   getChatProvider,
   getOpenAIChatModel,
@@ -467,15 +473,21 @@ function handleStorageQuotaError(res, storageError) {
 }
 
 async function enrichCompaniesWithStoragePool(companies) {
+  const { getEffectiveQuestionQuota } = require("./services/questionQuota");
   return Promise.all(
     companies.map(async (company) => {
       const snapshot = await getTenantStorageSnapshot(company.id);
+      const questionQuota = await getEffectiveQuestionQuota({ companyId: company.id });
       if (!snapshot) {
         return {
           ...company,
           storage_pool_scope: "company",
           storage_used_mb: 0,
           storage_remaining_mb: Number(company.storage_limit_mb) || 0,
+          monthly_question_limit: questionQuota?.monthly_question_limit ?? null,
+          current_month_question_count:
+            questionQuota?.current_month_question_count ?? 0,
+          remaining_questions: questionQuota?.remaining_questions ?? null,
         };
       }
       return {
@@ -485,6 +497,10 @@ async function enrichCompaniesWithStoragePool(companies) {
         storage_committed_mb: snapshot.storage_committed_mb,
         storage_reserved_mb: snapshot.storage_reserved_mb,
         storage_remaining_mb: snapshot.storage_remaining_mb,
+        monthly_question_limit: questionQuota?.monthly_question_limit ?? null,
+        current_month_question_count:
+          questionQuota?.current_month_question_count ?? 0,
+        remaining_questions: questionQuota?.remaining_questions ?? null,
       };
     })
   );
@@ -1037,6 +1053,8 @@ adminRouter.post("/companies", requireAuth, requireAdmin, async (req, res, next)
       company_name,
       openai_api_key,
       storage_limit_mb: req.body?.storage_limit_mb ?? req.body?.storage_limit,
+      monthly_question_limit:
+        req.body?.monthly_question_limit ?? req.body?.monthlyQuestionLimit,
     });
 
     const admin_username = String(req.body?.admin_username || "").trim();
@@ -1076,10 +1094,17 @@ async function updateCompanyHandler(req, res, next) {
     }
 
     const storage_limit_mb = req.body?.storage_limit_mb ?? req.body?.storage_limit;
+    const monthly_question_limit =
+      req.body?.monthly_question_limit ?? req.body?.monthlyQuestionLimit;
 
-    if (storage_limit_mb === undefined || storage_limit_mb === null || storage_limit_mb === "") {
+    if (
+      (storage_limit_mb === undefined || storage_limit_mb === null || storage_limit_mb === "") &&
+      (monthly_question_limit === undefined ||
+        monthly_question_limit === null ||
+        monthly_question_limit === "")
+    ) {
       return res.status(400).json({
-        error: "storage_limit_mb is required.",
+        error: "storage_limit_mb or monthly_question_limit is required.",
       });
     }
 
@@ -1087,10 +1112,15 @@ async function updateCompanyHandler(req, res, next) {
       "[ADMIN] PATCH/PUT /companies/:id | id:",
       companyId,
       "| storage_limit_mb:",
-      storage_limit_mb
+      storage_limit_mb,
+      "| monthly_question_limit:",
+      monthly_question_limit
     );
 
-    const company = updateCompanyLimits(companyId, { storage_limit_mb });
+    const company = updateCompanyLimits(companyId, {
+      storage_limit_mb,
+      monthly_question_limit,
+    });
     if (!company) {
       return res.status(404).json({ error: "Company not found.", company_id: companyId });
     }
@@ -1100,7 +1130,10 @@ async function updateCompanyHandler(req, res, next) {
       company,
     });
   } catch (error) {
-    if (error.message?.includes("must be a positive integer")) {
+    if (
+      error.message?.includes("must be a positive integer") ||
+      error.message?.includes("monthly_question_limit")
+    ) {
       return res.status(400).json({ error: error.message });
     }
     return next(error);
@@ -1157,6 +1190,8 @@ adminRouter.post("/users", requireAuth, requireAdmin, async (req, res, next) => 
       company_id,
       storage_limit_mb_raw
     );
+    const monthly_question_limit_raw =
+      req.body?.monthly_question_limit ?? req.body?.monthlyQuestionLimit;
 
     const user = await Promise.resolve(
       createTenantUser({
@@ -1165,6 +1200,7 @@ adminRouter.post("/users", requireAuth, requireAdmin, async (req, res, next) => 
         company_id,
         role: "user",
         storage_limit_mb,
+        monthly_question_limit: monthly_question_limit_raw,
       })
     );
 
@@ -1216,8 +1252,17 @@ adminRouter.patch("/users/:userId", requireAuth, requireAdmin, async (req, res, 
       userId,
       storage_limit_mb_raw
     );
+    const monthly_question_limit_raw =
+      req.body?.monthly_question_limit ?? req.body?.monthlyQuestionLimit;
 
-    const user = await Promise.resolve(updateTenantUser(userId, { storage_limit_mb }));
+    const user = await Promise.resolve(
+      updateTenantUser(userId, {
+        storage_limit_mb,
+        ...(monthly_question_limit_raw !== undefined
+          ? { monthly_question_limit: monthly_question_limit_raw }
+          : {}),
+      })
+    );
     if (!user) {
       return res.status(404).json({ error: "User not found.", user_id: userId });
     }
@@ -1317,6 +1362,9 @@ adminRouter.post(
         storage_limit_mb_raw
       );
 
+      const monthly_question_limit_raw =
+        req.body?.monthly_question_limit ?? req.body?.monthlyQuestionLimit;
+
       createdUser = await Promise.resolve(
         createTenantUser({
           username,
@@ -1324,6 +1372,7 @@ adminRouter.post(
           company_id,
           role: "user",
           storage_limit_mb,
+          monthly_question_limit: monthly_question_limit_raw,
         })
       );
 
@@ -1624,7 +1673,12 @@ async function companyStorageHandlerCore(req, res) {
   if (!snapshot) {
     return res.status(404).json({ error: "Company not found." });
   }
-  return res.status(200).json(snapshot);
+  const scopeUserId = resolveWorkspaceDocumentUserScope(req);
+  const enriched = await attachQuestionQuotaToSnapshot(snapshot, {
+    companyId: company.id,
+    userId: scopeUserId,
+  });
+  return res.status(200).json(enriched);
 }
 
 const companyStorageHandler = wrapRoute(companyStorageHandlerCore, "STORAGE");
@@ -1927,6 +1981,13 @@ chatRouter.post("/", async (req, res, next) => {
     }
     console.log("[CHAT] company_id:", companyId);
 
+    if (!trialCompanyId) {
+      const monthlyQuota = await assertMonthlyQuestionQuotaAllowed(req, res);
+      if (!monthlyQuota.ok) {
+        return monthlyQuota.response;
+      }
+    }
+
     const company = trialCompanyId
       ? { id: companyId, company_name: "Free Trial Sandbox", name: "Free Trial Sandbox" }
       : await resolveCompanyRecord(companyId);
@@ -2136,12 +2197,14 @@ chatRouter.post("/", async (req, res, next) => {
       "Failed to communicate with LLM provider. Please check your network connection or reduce payload size.";
 
     try {
-      const { provider, model } = await streamChatCompletion(
-        { messages, apiKey: company.openai_api_key || null },
-        (delta) => {
-          fullText += delta;
-          writeStreamToken(res, delta);
-        }
+      const { provider, model } = await runQueuedLlmTask(() =>
+        streamChatCompletion(
+          { messages, apiKey: company.openai_api_key || null },
+          (delta) => {
+            fullText += delta;
+            writeStreamToken(res, delta);
+          }
+        )
       );
 
       console.log("[CHAT] ✅ Stream complete, answer length:", fullText.length);
@@ -2172,6 +2235,17 @@ chatRouter.post("/", async (req, res, next) => {
         });
       } catch (persistErr) {
         console.warn("[CHAT] Failed to persist chat history:", persistErr.message);
+      }
+
+      if (!trialCompanyId) {
+        try {
+          await incrementQuestionQuotaCounter({
+            companyId: company.id,
+            userId: chatScopeUserId,
+          });
+        } catch (quotaErr) {
+          console.warn("[CHAT] Failed to increment question quota:", quotaErr.message);
+        }
       }
 
       res.end();

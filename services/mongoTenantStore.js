@@ -6,6 +6,15 @@ const sqliteHelpers = require("./tenantStoreSqlite");
 
 const DEFAULT_ADMIN_USERNAME = sqliteHelpers.DEFAULT_ADMIN_USERNAME;
 const DEFAULT_ADMIN_PASSWORD = sqliteHelpers.DEFAULT_ADMIN_PASSWORD;
+const {
+  getDefaultMonthlyQuestionLimit,
+  parseMonthlyQuestionLimitInput,
+} = require("./questionQuota");
+
+function currentQuotaMonth() {
+  const now = new Date();
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+}
 
 function mapCompanyDoc(doc) {
   if (!doc) return null;
@@ -14,6 +23,9 @@ function mapCompanyDoc(doc) {
     company_name: doc.company_name,
     openai_api_key: doc.openai_api_key,
     storage_limit_mb: doc.storage_limit_mb,
+    monthly_question_limit: doc.monthly_question_limit,
+    current_month_question_count: doc.current_month_question_count,
+    question_quota_month: doc.question_quota_month,
     max_users: doc.max_users,
     status: doc.status,
     created_at: doc.created_at,
@@ -29,6 +41,9 @@ function mapUserDoc(doc) {
     company_id: doc.company_id,
     role: doc.role,
     storage_limit_mb: doc.storage_limit_mb,
+    monthly_question_limit: doc.monthly_question_limit,
+    current_month_question_count: doc.current_month_question_count,
+    question_quota_month: doc.question_quota_month,
     created_at: doc.created_at,
   });
 }
@@ -133,6 +148,7 @@ async function createUser({
   company_id,
   role = "user",
   storage_limit_mb = undefined,
+  monthly_question_limit = undefined,
 }) {
   const uname = String(username || "").trim();
   const companyId = String(company_id || "").trim();
@@ -152,6 +168,15 @@ async function createUser({
     resolvedStorageMb = await parseUserStorageLimitMb(storage_limit_mb, companyId);
   }
 
+  let resolvedQuestionLimit = null;
+  if (
+    monthly_question_limit !== undefined &&
+    monthly_question_limit !== null &&
+    monthly_question_limit !== ""
+  ) {
+    resolvedQuestionLimit = parseMonthlyQuestionLimitInput(monthly_question_limit);
+  }
+
   const user = {
     id: `usr_${crypto.randomBytes(6).toString("hex")}`,
     username: uname.toLowerCase(),
@@ -159,6 +184,9 @@ async function createUser({
     company_id: companyId,
     role: userRole,
     storage_limit_mb: resolvedStorageMb,
+    monthly_question_limit: resolvedQuestionLimit,
+    current_month_question_count: 0,
+    question_quota_month: currentQuotaMonth(),
     created_at: new Date(),
   };
 
@@ -166,17 +194,29 @@ async function createUser({
   return sqliteHelpers.publicUser(user);
 }
 
-async function updateUserById(userId, { storage_limit_mb } = {}) {
+async function updateUserById(userId, { storage_limit_mb, monthly_question_limit } = {}) {
   const existing = await findUserById(userId);
   if (!existing) return null;
-  if (storage_limit_mb === undefined) return sqliteHelpers.publicUser(existing);
+  if (storage_limit_mb === undefined && monthly_question_limit === undefined) {
+    return sqliteHelpers.publicUser(existing);
+  }
 
-  const resolved = await parseUserStorageLimitMb(storage_limit_mb, existing.company_id, {
-    excludeUserId: existing.id,
-  });
+  const $set = {};
+  if (storage_limit_mb !== undefined) {
+    const resolved = await parseUserStorageLimitMb(storage_limit_mb, existing.company_id, {
+      excludeUserId: existing.id,
+    });
+    $set.storage_limit_mb = resolved;
+  }
+  if (monthly_question_limit !== undefined) {
+    $set.monthly_question_limit =
+      monthly_question_limit === null || monthly_question_limit === ""
+        ? null
+        : parseMonthlyQuestionLimitInput(monthly_question_limit);
+  }
 
-  await User.updateOne({ id: existing.id }, { $set: { storage_limit_mb: resolved } });
-  return sqliteHelpers.publicUser({ ...existing, storage_limit_mb: resolved });
+  await User.updateOne({ id: existing.id }, { $set });
+  return sqliteHelpers.publicUser({ ...existing, ...$set });
 }
 
 async function getUserStorageLimitMbResolved(userId) {
@@ -215,14 +255,30 @@ async function getTenantMetrics() {
   };
 }
 
-async function updateCompanyLimits(companyId, { storage_limit_mb }) {
+async function updateCompanyLimits(companyId, { storage_limit_mb, monthly_question_limit } = {}) {
   const existing = await getCompanyById(companyId);
   if (!existing) return null;
-  const parsed = Number.parseInt(storage_limit_mb, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    throw new Error("storage_limit_mb must be a positive integer.");
+
+  const $set = {};
+  if (storage_limit_mb !== undefined && storage_limit_mb !== null && storage_limit_mb !== "") {
+    const parsed = Number.parseInt(storage_limit_mb, 10);
+    if (!Number.isFinite(parsed) || parsed < 1) {
+      throw new Error("storage_limit_mb must be a positive integer.");
+    }
+    $set.storage_limit_mb = parsed;
   }
-  await Company.updateOne({ id: existing.id }, { $set: { storage_limit_mb: parsed } });
+  if (
+    monthly_question_limit !== undefined &&
+    monthly_question_limit !== null &&
+    monthly_question_limit !== ""
+  ) {
+    $set.monthly_question_limit = parseMonthlyQuestionLimitInput(monthly_question_limit);
+  }
+  if (!Object.keys($set).length) {
+    throw new Error("storage_limit_mb or monthly_question_limit is required.");
+  }
+
+  await Company.updateOne({ id: existing.id }, { $set });
   return {
     ...(await getCompanyById(existing.id)),
     user_count: await countUsersByCompanyId(existing.id),
