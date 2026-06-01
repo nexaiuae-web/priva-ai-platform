@@ -515,7 +515,7 @@ function listUsersForAdmin() {
   const db = getDb();
   const rows = db
     .prepare(
-      `SELECT u.id, u.username, u.company_id, u.role, u.storage_limit_mb, u.created_at, c.company_name
+      `SELECT u.id, u.username, u.company_id, u.role, u.storage_limit_mb, u.monthly_question_limit, u.current_month_question_count, u.created_at, c.company_name
        FROM users u
        INNER JOIN companies c ON c.id = u.company_id
        WHERE LOWER(TRIM(u.username)) != LOWER(?)
@@ -530,6 +530,7 @@ function listUsersForAdmin() {
       ...publicUser(mapped),
       company_name: row.company_name,
       storage_limit_mb: getUserStorageLimitMbResolved(mapped.id),
+      user_monthly_question_limit: mapped.monthly_question_limit,
     };
   });
 }

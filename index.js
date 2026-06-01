@@ -1145,17 +1145,28 @@ adminRouter.put("/companies/:id", requireAuth, requireAdmin, updateCompanyHandle
 
 adminRouter.get("/users", requireAuth, requireAdmin, async (_req, res) => {
   try {
+    const { getEffectiveQuestionQuota } = require("./services/questionQuota");
     const userRows = await Promise.resolve(listUsersForAdmin());
     const users = await Promise.all(
       userRows.map(async (user) => {
         const profile = await getFaceProfile(user.id);
         const referenceCount = await getFaceReferenceCount(user.id);
         const storageSnapshot = await getUserStorageSnapshot(user.id);
+        const questionQuota = await getEffectiveQuestionQuota({
+          companyId: user.company_id,
+          userId: user.id,
+        });
         return {
           ...user,
           storage_limit_mb: storageSnapshot?.storage_limit_mb ?? user.storage_limit_mb,
           storage_used_mb: storageSnapshot?.storage_used_mb ?? 0,
           storage_remaining_mb: storageSnapshot?.storage_remaining_mb ?? 0,
+          question_pool_scope: questionQuota?.scope ?? "company",
+          current_month_question_count:
+            questionQuota?.current_month_question_count ?? 0,
+          monthly_question_limit: questionQuota?.monthly_question_limit ?? null,
+          remaining_questions: questionQuota?.remaining_questions ?? 0,
+          uses_company_question_pool: questionQuota?.scope === "company",
           has_face_profile:
             (profile?.reference_count || 0) > 0 ||
             (await referenceImageExists(user.id)),
@@ -1254,13 +1265,21 @@ adminRouter.patch("/users/:userId", requireAuth, requireAdmin, async (req, res, 
     );
     const monthly_question_limit_raw =
       req.body?.monthly_question_limit ?? req.body?.monthlyQuestionLimit;
+    const monthlyPatch =
+      monthly_question_limit_raw !== undefined
+        ? {
+            monthly_question_limit:
+              monthly_question_limit_raw === null ||
+              monthly_question_limit_raw === ""
+                ? null
+                : monthly_question_limit_raw,
+          }
+        : {};
 
     const user = await Promise.resolve(
       updateTenantUser(userId, {
         storage_limit_mb,
-        ...(monthly_question_limit_raw !== undefined
-          ? { monthly_question_limit: monthly_question_limit_raw }
-          : {}),
+        ...monthlyPatch,
       })
     );
     if (!user) {
@@ -1268,13 +1287,24 @@ adminRouter.patch("/users/:userId", requireAuth, requireAdmin, async (req, res, 
     }
 
     const storageSnapshot = await getUserStorageSnapshot(user.id);
+    const { getEffectiveQuestionQuota } = require("./services/questionQuota");
+    const questionQuota = await getEffectiveQuestionQuota({
+      companyId: user.company_id,
+      userId: user.id,
+    });
 
     return res.status(200).json({
-      message: "User storage quota updated.",
+      message: "User quotas updated.",
       user: {
         ...user,
         storage_used_mb: storageSnapshot?.storage_used_mb ?? 0,
         storage_remaining_mb: storageSnapshot?.storage_remaining_mb ?? 0,
+        question_pool_scope: questionQuota?.scope ?? "company",
+        current_month_question_count:
+          questionQuota?.current_month_question_count ?? 0,
+        monthly_question_limit: questionQuota?.monthly_question_limit ?? null,
+        remaining_questions: questionQuota?.remaining_questions ?? 0,
+        uses_company_question_pool: questionQuota?.scope === "company",
       },
     });
   } catch (error) {

@@ -335,6 +335,7 @@ async function listUsersForAdmin() {
       ...sqliteHelpers.publicUser(mapped),
       company_name: companyNameById.get(mapped.company_id) || mapped.company_id,
       storage_limit_mb: await getUserStorageLimitMbResolved(mapped.id),
+      user_monthly_question_limit: mapped.monthly_question_limit,
     });
   }
   return rows;
