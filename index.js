@@ -92,10 +92,14 @@ const { buildMessagesForChat } = require("./services/promptManager");
 const {
   budgetRetrievedContexts,
   fitMessagesToTokenBudget,
-  parseRequestHistory,
   CHAT_MAX_CHUNKS,
   estimateMessagesTokens,
 } = require("./services/contextBudget");
+const {
+  listChatMessagesForCompany,
+  appendChatExchange,
+  parseSanitizedRequestHistory,
+} = require("./services/chatHistory");
 const { streamChatCompletion } = require("./services/llm");
 const {
   getChatProvider,
@@ -1851,6 +1855,48 @@ async function deleteDocumentHandler(req, res, next) {
 // ============================================
 // 🤖 CHAT API — باستخدام Chroma Native
 // ============================================
+async function chatHistoryHandlerCore(req, res) {
+  const trialCompanyId = getTrialCompanyIdForRequest(req);
+  if (isTrialModeRequest(req) && !isValidTrialCompanyId(trialCompanyId)) {
+    return respondMissingTrialFingerprint(res);
+  }
+
+  const companyId = trialCompanyId || (await resolveCompanyId(req));
+  if (!companyId) {
+    return res.status(400).json({ error: "company_id could not be resolved." });
+  }
+
+  req.auth = req.auth || {};
+  req.auth.company_id = companyId;
+  if (trialCompanyId) {
+    attachTrialAuthContext(req, trialCompanyId);
+  }
+
+  const scopeUserId = resolveWorkspaceDocumentUserScope(req);
+  const messages = await listChatMessagesForCompany(companyId, {
+    user_id: scopeUserId,
+  });
+
+  console.log(
+    "[CHAT] GET /history",
+    companyId,
+    "user:",
+    scopeUserId || "(company)",
+    "→",
+    messages.length,
+    "messages"
+  );
+
+  return res.status(200).json({
+    company_id: companyId,
+    messages,
+  });
+}
+
+const chatHistoryHandler = wrapRoute(chatHistoryHandlerCore, "CHAT_HISTORY");
+
+chatRouter.get("/history", chatHistoryHandler);
+
 chatRouter.post("/", async (req, res, next) => {
   console.log("\n========== [CHAT] REQUEST RECEIVED ==========");
   console.log("[CHAT] Timestamp:", new Date().toISOString());
@@ -2033,7 +2079,7 @@ chatRouter.post("/", async (req, res, next) => {
       getChatProvider(),
       isOpenAIChatEnabled() ? `(${getOpenAIChatModel()})` : `(Ollama ${getChatModel()})`
     );
-    const chatHistory = parseRequestHistory(req.body);
+    const chatHistory = parseSanitizedRequestHistory(req.body, company.id);
     debugLogContextsForLlm(contexts, "chat/raw-retrieval");
     const { contexts: budgetedContexts, stats: budgetStats } =
       budgetRetrievedContexts(contexts);
@@ -2115,6 +2161,19 @@ chatRouter.post("/", async (req, res, next) => {
         company_id: company.id,
         company_name: companyDisplayName,
       });
+
+      try {
+        await appendChatExchange({
+          company_id: company.id,
+          user_id: chatScopeUserId,
+          user_message: question,
+          assistant_message: fullText,
+          sources,
+        });
+      } catch (persistErr) {
+        console.warn("[CHAT] Failed to persist chat history:", persistErr.message);
+      }
+
       res.end();
     } catch (streamErr) {
       console.error(
