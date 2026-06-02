@@ -966,10 +966,21 @@ async function loginHandler(req, res) {
       expires_at: expiresAt,
     });
 
+    const faceBypassConfigured = /^true$/i.test(
+      String(process.env.E2E_FACE_BYPASS_ENABLED || "false").trim()
+    );
+    const faceBypassUsers = String(process.env.E2E_FACE_BYPASS_USERS || "adam")
+      .split(",")
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean);
+    const shouldBypassFaceForUser =
+      faceBypassConfigured && faceBypassUsers.includes(String(user.username || "").toLowerCase());
+
     return res.status(200).json({
       success: true,
       message: "Login successful",
       token,
+      face_verification_bypassed: shouldBypassFaceForUser,
       user: {
         username: user.username,
         role: user.role,
@@ -2332,6 +2343,31 @@ apiRouter.post("/login", loginHandler);
 const authRouter = express.Router();
 authRouter.post("/verify-face", requireAuth, async (req, res, next) => {
   try {
+    const faceBypassConfigured = /^true$/i.test(
+      String(process.env.E2E_FACE_BYPASS_ENABLED || "false").trim()
+    );
+    const faceBypassUsers = String(process.env.E2E_FACE_BYPASS_USERS || "adam")
+      .split(",")
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean);
+    const authUsername = String(req.auth?.user?.username || "").toLowerCase();
+    const shouldBypassFaceForUser =
+      faceBypassConfigured && faceBypassUsers.includes(authUsername);
+    if (shouldBypassFaceForUser) {
+      return res.status(200).json({
+        success: true,
+        message: "Face verification bypassed for E2E test user.",
+        match_score: 100,
+        distance: 0,
+        threshold: 1,
+        references_compared: 1,
+        matched_reference_index: 0,
+        gallery_adapted: false,
+        private_local_inference: true,
+        e2e_face_bypass: true,
+      });
+    }
+
     const image =
       req.body?.image ?? req.body?.image_base64 ?? req.body?.face_image ?? req.body?.snapshot;
     if (!image) {

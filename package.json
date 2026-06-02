@@ -7,7 +7,8 @@
     "start": "node index.js",
     "dev": "node scripts/dev.js",
     "dev:api": "node index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "test:e2e": "playwright test"
   },
   "keywords": [],
   "author": "",
@@ -44,5 +45,8 @@
     "sharp": "^0.34.5",
     "tesseract.js": "^7.0.0",
     "undici": "^6.26.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0"
   }
 }
