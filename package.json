@@ -18,6 +18,7 @@
     "@langchain/community": "^1.1.28",
     "@langchain/openai": "^1.4.5",
     "@napi-rs/canvas": "^1.0.0",
+    "@supabase/supabase-js": "^2.107.0",
     "@tensorflow/tfjs": "^4.22.0",
     "@tensorflow/tfjs-backend-cpu": "^4.22.0",
     "@tensorflow/tfjs-backend-wasm": "^4.22.0",
