@@ -915,6 +915,15 @@ app.get("/health", (_req, res) => {
   });
 });
 
+// Support message endpoint (public — no JWT required)
+app.post("/api/support", async (req, res) => {
+  const { message, userId, timestamp } = req.body;
+
+  console.log("New support message received:", { message, userId, timestamp });
+
+  res.status(200).json({ success: true, message: "Message received successfully" });
+});
+
 app.get("/chat", (_req, res) => {
   const chatHtmlPath = path.join(PUBLIC_DIR, "chat.html");
   res.sendFile(chatHtmlPath, (err) => {
