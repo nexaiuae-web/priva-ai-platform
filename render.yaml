@@ -5,7 +5,8 @@ services:
     name: priva-ai-api
     runtime: node
     plan: free
-    buildCommand: npm install
+    # Do not override PATH in Render env without appending ($PATH) — breaks /home/render/colors.sh (tput).
+    buildCommand: npm install --legacy-peer-deps --omit=dev
     startCommand: npm start
     healthCheckPath: /health
     envVars:
@@ -23,6 +24,10 @@ services:
         value: "500"
       - key: LLM_MAX_CONCURRENT
         value: "5"
+      - key: DISABLE_OPENCOLLECTIVE
+        value: "1"
+      - key: CI
+        value: "true"
       # Set in Render dashboard (never commit secrets):
       # MONGODB_URI, JWT_SECRET, OPENAI_API_KEY, CORS_ORIGIN,
       # PRIVA_CLOUDINARY_CLOUD_NAME, PRIVA_CLOUDINARY_API_KEY, PRIVA_CLOUDINARY_API_SECRET, etc.
