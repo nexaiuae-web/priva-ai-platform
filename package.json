@@ -15,8 +15,9 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@langchain/community": "^1.1.28",
-    "@langchain/openai": "^1.4.5",
+    "@langchain/community": "^1.1.29",
+    "@langchain/core": "^1.1.48",
+    "@langchain/openai": "^1.4.7",
     "@napi-rs/canvas": "^1.0.0",
     "@supabase/supabase-js": "^2.107.0",
     "@tensorflow/tfjs": "^4.22.0",
