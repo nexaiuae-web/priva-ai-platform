@@ -1,4 +1,6 @@
 require("dotenv").config();
+const { createClient } = require("@supabase/supabase-js");
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const { connectDatabase } = require("./config/database");
 
 const path = require("path");
@@ -918,10 +920,18 @@ app.get("/health", (_req, res) => {
 // Support message endpoint (public — no JWT required)
 app.post("/api/support", async (req, res) => {
   const { message, userId, timestamp } = req.body;
+  try {
+    const { error } = await supabase
+      .from("support_messages")
+      .insert([{ message, sender: "user", user_id: userId }]);
 
-  console.log("New support message received:", { message, userId, timestamp });
-
-  res.status(200).json({ success: true, message: "Message received successfully" });
+    if (error) throw error;
+    console.log("New support message saved:", { message, userId, timestamp });
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error("Supabase Error:", err);
+    res.status(500).json({ error: "Failed to save message" });
+  }
 });
 
 app.get("/chat", (_req, res) => {
