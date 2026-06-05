@@ -206,6 +206,8 @@ async function retrieveContextsViaChromaNative(
 
 const app = express();
 
+app.get('/', (req, res) => { res.status(200).send('OK'); });
+
 const CORS_ORIGINS = String(
   process.env.CORS_ORIGINS ||
     "http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173,http://127.0.0.1:5173"
