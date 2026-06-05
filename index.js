@@ -235,7 +235,7 @@ app.use(
   })
 );
 
-const PORT = Number(process.env.PORT) || 3005;
+const PORT = process.env.PORT || 10000;
 
 const PUBLIC_DIR = path.join(__dirname, "public");
 
@@ -2684,6 +2684,33 @@ app.use((error, _req, res, _next) => {
 });
 
 (async () => {
+  if (!isRenderPlatform()) {
+    startFrontendDevServer();
+  }
+
+  console.log("[BOOT] Starting server listener...");
+  app.listen(PORT, () => {
+    console.log(`\n🚀 PRIVA-AI API running on http://localhost:${PORT}`);
+    if (!isRenderPlatform()) {
+      console.log(`📝 Built-in chat UI: http://localhost:${PORT}/chat`);
+      console.log(`🌐 User frontend (Vite): http://localhost:8080`);
+      console.log(
+        `   → Start UI: cd priva-ai-workspace-main/priva-ai-workspace-main && npm run dev`
+      );
+      console.log(
+        `   → Or set START_FRONTEND_DEV=1 to launch Vite from this process (see FRONTEND_DIR)`
+      );
+      console.log(`📁 Chroma local persist: ${CHROMA_DATA_DIR}`);
+    } else {
+      console.log("[BOOT] Render mode: VECTOR_STORE=mongo | TENANT_STORE=mongo (auto)");
+      console.log(`📤 Upload staging: ${UPLOAD_STAGING_DIR}`);
+    }
+    console.log(`🤖 Ollama: ${process.env.OLLAMA_URL || "http://127.0.0.1:11434"}`);
+    console.log(`💬 Chat model: ${getChatModel()} | 📐 Embed model: ${getPrimaryEmbedModel()}`);
+    console.log(`\n✅ Ready for requests.\n`);
+  });
+
+  // Non-blocking background init — server listens even if DB/Chroma/face preload is slow or fails.
   try {
     // MongoDB disabled — Supabase support features do not require it.
     // Re-enable when MONGODB_URI is available:
@@ -2717,32 +2744,6 @@ app.use((error, _req, res, _next) => {
       console.log("[BOOT] Render mode: skipping local Face-API preload (ephemeral disk)");
     }
   } catch (e) {
-    console.error("[BOOT] Startup failed:", e.message);
-    process.exit(1);
+    console.error("[BOOT] Background init failed (server still running):", e.message);
   }
-
-  if (!isRenderPlatform()) {
-    startFrontendDevServer();
-  }
-
-  app.listen(PORT, () => {
-    console.log(`\n🚀 PRIVA-AI API running on http://localhost:${PORT}`);
-    if (!isRenderPlatform()) {
-      console.log(`📝 Built-in chat UI: http://localhost:${PORT}/chat`);
-      console.log(`🌐 User frontend (Vite): http://localhost:8080`);
-      console.log(
-        `   → Start UI: cd priva-ai-workspace-main/priva-ai-workspace-main && npm run dev`
-      );
-      console.log(
-        `   → Or set START_FRONTEND_DEV=1 to launch Vite from this process (see FRONTEND_DIR)`
-      );
-      console.log(`📁 Chroma local persist: ${CHROMA_DATA_DIR}`);
-    } else {
-      console.log("[BOOT] Render mode: VECTOR_STORE=mongo | TENANT_STORE=mongo (auto)");
-      console.log(`📤 Upload staging: ${UPLOAD_STAGING_DIR}`);
-    }
-    console.log(`🤖 Ollama: ${process.env.OLLAMA_URL || "http://127.0.0.1:11434"}`);
-    console.log(`💬 Chat model: ${getChatModel()} | 📐 Embed model: ${getPrimaryEmbedModel()}`);
-    console.log(`\n✅ Ready for requests.\n`);
-  });
 })();
