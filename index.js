@@ -918,19 +918,88 @@ app.get("/health", (_req, res) => {
 });
 
 // Support message endpoint (public — no JWT required)
-app.post("/api/support", async (req, res) => {
-  const { message, userId, timestamp } = req.body;
+app.get("/api/support", async (req, res) => {
+  const user_id = String(req.query?.user_id ?? req.query?.userId ?? "").trim();
+  if (!user_id) {
+    return res.status(400).json({ success: false, error: "user_id is required." });
+  }
+
   try {
-    const { error } = await supabase
+    const { data: messages, error: messagesError } = await supabase
       .from("support_messages")
-      .insert([{ message, sender: "user", user_id: userId }]);
+      .select("id, user_id, message, created_at")
+      .eq("user_id", user_id)
+      .order("created_at", { ascending: true });
+
+    if (messagesError) throw messagesError;
+
+    const messageIds = (messages || []).map((row) => row.id).filter(Boolean);
+    let replies = [];
+
+    if (messageIds.length > 0) {
+      const { data: replyRows, error: repliesError } = await supabase
+        .from("support_replies")
+        .select("id, message_id, reply_text, created_at")
+        .in("message_id", messageIds)
+        .order("created_at", { ascending: true });
+
+      if (repliesError) throw repliesError;
+      replies = replyRows || [];
+    }
+
+    return res.status(200).json({
+      success: true,
+      messages: messages || [],
+      replies,
+    });
+  } catch (err) {
+    console.error("[SUPPORT] GET /api/support Supabase error:", err);
+    return res.status(500).json({ success: false, error: "Failed to load support messages" });
+  }
+});
+
+app.post("/api/support", async (req, res) => {
+  console.log("[SUPPORT] POST /api/support incoming body:", req.body);
+
+  const message = String(req.body?.message ?? req.body?.content ?? "").trim();
+  const user_id = String(req.body?.user_id ?? req.body?.userId ?? "").trim();
+  const timestamp = req.body?.timestamp ?? null;
+
+  console.log("[SUPPORT] POST /api/support normalized payload:", {
+    message,
+    user_id,
+    timestamp,
+  });
+
+  if (!message) {
+    return res.status(400).json({ success: false, error: "message is required." });
+  }
+  if (!user_id) {
+    return res.status(400).json({ success: false, error: "user_id is required." });
+  }
+
+  try {
+    const insertPayload = {
+      message,
+      sender: "user",
+      user_id,
+    };
+
+    console.log("[SUPPORT] POST /api/support inserting into support_messages:", insertPayload);
+
+    const { data, error } = await supabase
+      .from("support_messages")
+      .insert([insertPayload])
+      .select("id, user_id, message, created_at")
+      .single();
 
     if (error) throw error;
-    console.log("New support message saved:", { message, userId, timestamp });
-    res.status(200).json({ success: true });
+
+    console.log("[SUPPORT] POST /api/support saved row:", data);
+    return res.status(200).json({ success: true, id: data?.id, message: data });
   } catch (err) {
-    console.error("Supabase Error:", err);
-    res.status(500).json({ error: "Failed to save message" });
+    console.error("[SUPPORT] POST /api/support Supabase error:", err);
+    return res.status(500).json({ success: false, error: "Failed to save message" });
   }
 });
 
@@ -1609,6 +1678,74 @@ adminRouter.delete("/companies/:id", requireAuth, requireAdmin, async (req, res,
   } catch (error) {
     console.error("[ADMIN] DELETE /companies/:id error:", error.message);
     return next(error);
+  }
+});
+
+// Support dashboard (auth middleware to be added later)
+adminRouter.get("/support-messages", async (_req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("support_messages")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    return res.status(200).json({
+      success: true,
+      messages: data || [],
+    });
+  } catch (err) {
+    console.error("[ADMIN] GET /support-messages Supabase error:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to fetch support messages",
+    });
+  }
+});
+
+adminRouter.post("/reply-message", async (req, res) => {
+  try {
+    const message_id = req.body?.message_id ?? req.body?.messageId;
+    const reply_text = String(req.body?.reply_text ?? req.body?.replyText ?? "").trim();
+
+    if (!message_id) {
+      return res.status(400).json({
+        success: false,
+        error: "message_id is required.",
+      });
+    }
+    if (!reply_text) {
+      return res.status(400).json({
+        success: false,
+        error: "reply_text is required.",
+      });
+    }
+
+    const { data, error } = await supabase
+      .from("support_replies")
+      .insert([
+        {
+          message_id,
+          reply_text,
+          sender: "admin",
+        },
+      ])
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    return res.status(201).json({
+      success: true,
+      reply: data,
+    });
+  } catch (err) {
+    console.error("[ADMIN] POST /reply-message Supabase error:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to save admin reply",
+    });
   }
 });
 
@@ -2548,18 +2685,23 @@ app.use((error, _req, res, _next) => {
 
 (async () => {
   try {
-    await connectDatabase();
-    await Promise.resolve(initTenantStore());
-    await backfillOrphanDocumentUploaders();
+    // MongoDB disabled — Supabase support features do not require it.
+    // Re-enable when MONGODB_URI is available:
+    // await connectDatabase();
+    // await backfillOrphanDocumentUploaders();
 
-    if (useMongoVectorStore()) {
-      const mongoVectorInit = await initializeChromaCollection("company_docs");
-      console.log("[BOOT] Vector store (MongoDB):", mongoVectorInit);
-    } else {
+    await Promise.resolve(initTenantStore());
+
+    // if (useMongoVectorStore()) {
+    //   const mongoVectorInit = await initializeChromaCollection("company_docs");
+    //   console.log("[BOOT] Vector store (MongoDB):", mongoVectorInit);
+    // } else {
       await ensureChromaServer();
       const chromaInit = await initializeChromaCollection("company_docs");
       console.log("[BOOT] Chroma collection init:", chromaInit);
-    }
+    // }
+
+    console.log("[BOOT] MongoDB connection skipped (disabled)");
 
     if (!isRenderPlatform()) {
       try {

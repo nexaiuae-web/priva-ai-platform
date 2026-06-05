@@ -31,3 +31,4 @@ Thumbs.db
 # Frontend (deploy API only; host UI separately or on static host)
 priva-ai-workspace-main/**/node_modules/
 priva-ai-workspace-main/**/dist/
+.env
