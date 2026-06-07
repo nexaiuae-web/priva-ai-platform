@@ -1,5 +1,5 @@
 require("dotenv").config();
-const { connectDatabase } = require("./config/database");
+const { connectDatabase, mongoose } = require("./config/database");
 
 const path = require("path");
 const fs = require("fs");
@@ -141,6 +141,7 @@ const {
 const {
   getUploadStagingDir,
   useMongoVectorStore,
+  useMongoTenants,
   isRenderPlatform,
 } = require("./services/runtimeConfig");
 
@@ -259,6 +260,11 @@ const {
   hasOpenAIKey,
 } = require("./services/embeddings");
 console.log("[BOOT] OLLAMA_URL:", process.env.OLLAMA_URL || "http://127.0.0.1:11434");
+console.log(
+  "[BOOT] TENANT_STORE:",
+  String(process.env.TENANT_STORE || "").trim() || (isRenderPlatform() ? "mongo (render default)" : "sqlite (local default)")
+);
+console.log("[BOOT] Tenant store backend:", useMongoTenants() ? "mongo" : "sqlite");
 console.log("[BOOT] RENDER:", isRenderPlatform() ? "yes (cloud embeddings → OpenAI when key set)" : "no");
 console.log("[BOOT] CHAT_PROVIDER:", getChatProvider());
 if (isOpenAIChatEnabled()) {
@@ -750,7 +756,18 @@ function resolveFolderIdFromRequest(req) {
   return normalizeFolderId(raw);
 }
 
+function returnIfMongoDisconnected(res) {
+  if (useMongoTenants() && mongoose.connection.readyState !== 1) {
+    console.error("[API] Database not connected. readyState =", mongoose.connection.readyState);
+    res.status(500).json({ success: false, message: "Database connection lost" });
+    return true;
+  }
+  return false;
+}
+
 async function listDocumentsHandlerCore(req, res) {
+  if (returnIfMongoDisconnected(res)) return;
+
   // CRITICAL: Free Trial must never reach premium/root company resolution below.
   if (isTrialModeRequest(req)) {
     const trialCompanyId = getTrialCompanyIdForRequest(req);
@@ -831,6 +848,8 @@ async function listFoldersHandlerCore(req, res) {
   if (isTrialModeRequest(req)) {
     return res.status(200).json({ folders: [] });
   }
+
+  if (returnIfMongoDisconnected(res)) return;
 
   const companyId = await resolveDocumentsCompanyId(req);
   if (!companyId && isTrialModeRequest(req)) {
@@ -950,6 +969,8 @@ async function loginHandler(req, res) {
       });
     }
 
+    if (returnIfMongoDisconnected(res)) return;
+
     const authResult = await verifyUserCredentials(username, password);
     if (!authResult) {
       return res.status(401).json({
@@ -1025,6 +1046,7 @@ adminRouter.post("/add-company", requireMasterKey, async (req, res, next) => {
 });
 
 adminRouter.get("/companies", requireAuth, requireAdmin, async (req, res) => {
+  if (returnIfMongoDisconnected(res)) return;
   try {
     console.log(
       "[ADMIN] GET /companies | user:",
@@ -1157,6 +1179,7 @@ adminRouter.patch("/companies/:id", requireAuth, requireAdmin, updateCompanyHand
 adminRouter.put("/companies/:id", requireAuth, requireAdmin, updateCompanyHandler);
 
 adminRouter.get("/users", requireAuth, requireAdmin, async (_req, res) => {
+  if (returnIfMongoDisconnected(res)) return;
   try {
     const { getEffectiveQuestionQuota } = require("./services/questionQuota");
     const userRows = await Promise.resolve(listUsersForAdmin());
@@ -1655,6 +1678,7 @@ async function listActiveUploadsHandlerCore(req, res) {
     if (!isValidTrialCompanyId(trialCompanyId)) {
       return res.status(200).json({ uploads: [] });
     }
+    if (returnIfMongoDisconnected(res)) return;
     attachTrialAuthContext(req, trialCompanyId);
     const jobs = await listUploadJobsByCompany(trialCompanyId, { activeOnly: true });
     return res.status(200).json({
@@ -1666,6 +1690,7 @@ async function listActiveUploadsHandlerCore(req, res) {
   if (!companyId) {
     return res.status(200).json({ uploads: [] });
   }
+  if (returnIfMongoDisconnected(res)) return;
   const scopeUserId = resolveWorkspaceDocumentUserScope(req);
   const jobs = await listUploadJobsByCompany(companyId, {
     activeOnly: true,
@@ -1706,6 +1731,8 @@ async function companyStorageHandlerCore(req, res) {
       storage_limit_mb: 5,
     });
   }
+
+  if (returnIfMongoDisconnected(res)) return;
 
   const companyId = await resolveCompanyId(req);
   const company = await resolveCompanyRecord(companyId);
@@ -1968,6 +1995,8 @@ async function chatHistoryHandlerCore(req, res) {
   if (trialCompanyId) {
     attachTrialAuthContext(req, trialCompanyId);
   }
+
+  if (returnIfMongoDisconnected(res)) return;
 
   const scopeUserId = resolveWorkspaceDocumentUserScope(req);
   const messages = await listChatMessagesForCompany(companyId, {
@@ -2529,6 +2558,70 @@ app.use((error, _req, res, _next) => {
   });
 });
 
+async function connectMongoIfRequired() {
+  const mongoTenants = useMongoTenants();
+  const mongoVector = useMongoVectorStore();
+  const mongoRequired = mongoTenants || mongoVector;
+
+  if (mongoTenants) {
+    console.log("[BOOT] TENANT_STORE=mongo — mongoose.connect required for tenant data");
+  }
+
+  if (!mongoRequired) {
+    console.log("[BOOT] MongoDB not required (sqlite tenants and/or chroma vector store)");
+    return false;
+  }
+
+  try {
+    await connectDatabase();
+    return true;
+  } catch (error) {
+    const message = error?.message || String(error);
+    console.error("[BOOT] Cannot start database-backed services — MongoDB connection failed:", message);
+    throw error;
+  }
+}
+
+async function initializeBackgroundServices() {
+  const mongoReady = await connectMongoIfRequired();
+
+  if (useMongoTenants()) {
+    if (!mongoReady) {
+      throw new Error("MongoDB is required for TENANT_STORE=mongo but connection is not ready.");
+    }
+    await initTenantStore();
+    await backfillOrphanDocumentUploaders();
+  } else {
+    await Promise.resolve(initTenantStore());
+  }
+
+  if (useMongoVectorStore()) {
+    if (!mongoReady) {
+      throw new Error("MongoDB is required for VECTOR_STORE=mongo but connection is not ready.");
+    }
+    const mongoVectorInit = await initializeChromaCollection("company_docs");
+    console.log("[BOOT] Vector store (MongoDB):", mongoVectorInit);
+  } else {
+    await ensureChromaServer();
+    const chromaInit = await initializeChromaCollection("company_docs");
+    console.log("[BOOT] Chroma collection init:", chromaInit);
+  }
+
+  if (!isRenderPlatform()) {
+    try {
+      await loadFaceModels();
+      console.log("[BOOT] Face-API models preloaded and ready");
+    } catch (faceBootErr) {
+      console.warn(
+        "[BOOT] Face-API preload failed (will retry on first face request):",
+        faceBootErr.message
+      );
+    }
+  } else {
+    console.log("[BOOT] Render mode: skipping local Face-API preload (ephemeral disk)");
+  }
+}
+
 (async () => {
   if (!isRenderPlatform()) {
     startFrontendDevServer();
@@ -2558,37 +2651,9 @@ app.use((error, _req, res, _next) => {
 
   // Non-blocking background init — server listens even if DB/Chroma/face preload is slow or fails.
   try {
-    // MongoDB disabled — re-enable when MONGODB_URI is available:
-    // await connectDatabase();
-    // await backfillOrphanDocumentUploaders();
-
-    await Promise.resolve(initTenantStore());
-
-    // if (useMongoVectorStore()) {
-    //   const mongoVectorInit = await initializeChromaCollection("company_docs");
-    //   console.log("[BOOT] Vector store (MongoDB):", mongoVectorInit);
-    // } else {
-      await ensureChromaServer();
-      const chromaInit = await initializeChromaCollection("company_docs");
-      console.log("[BOOT] Chroma collection init:", chromaInit);
-    // }
-
-    console.log("[BOOT] MongoDB connection skipped (disabled)");
-
-    if (!isRenderPlatform()) {
-      try {
-        await loadFaceModels();
-        console.log("[BOOT] Face-API models preloaded and ready");
-      } catch (faceBootErr) {
-        console.warn(
-          "[BOOT] Face-API preload failed (will retry on first face request):",
-          faceBootErr.message
-        );
-      }
-    } else {
-      console.log("[BOOT] Render mode: skipping local Face-API preload (ephemeral disk)");
-    }
+    await initializeBackgroundServices();
   } catch (e) {
     console.error("[BOOT] Background init failed (server still running):", e.message);
+    if (e.stack) console.error(e.stack);
   }
 })();

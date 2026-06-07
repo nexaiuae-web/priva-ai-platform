@@ -422,7 +422,7 @@ async function ensureDefaultAdminUser() {
 async function initTenantStore() {
   await ensureDefaultAdminUser();
   const companies = await listCompanies();
-  console.log("[TENANT/MONGO] Mongo tenant store ready | companies:", companies.length);
+  console.log("[TENANT] MongoDB store ready | companies:", companies.length);
   return { companies };
 }
 

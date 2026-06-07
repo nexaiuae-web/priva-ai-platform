@@ -29,15 +29,40 @@ async function connectDatabase() {
   attachLifecycleListeners();
 
   if (mongoose.connection.readyState === 1) {
+    console.log("[DB] MongoDB already connected:", mongoose.connection.host || "(unknown-host)");
     return mongoose.connection;
   }
 
-  await mongoose.connect(uri, {
-    autoIndex: true,
-    maxPoolSize: 10,
-  });
+  const serverSelectionTimeoutMS =
+    Number(process.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS) || 15000;
+  const connectTimeoutMS = Number(process.env.MONGODB_CONNECT_TIMEOUT_MS) || 15000;
 
-  return mongoose.connection;
+  console.log(
+    "[DB] Connecting to MongoDB…",
+    `(serverSelectionTimeoutMS=${serverSelectionTimeoutMS})`
+  );
+
+  try {
+    await mongoose.connect(uri, {
+      autoIndex: true,
+      maxPoolSize: 10,
+      serverSelectionTimeoutMS,
+      connectTimeoutMS,
+    });
+    console.log("[DB] MongoDB connected successfully:", mongoose.connection.host || "(unknown-host)");
+    return mongoose.connection;
+  } catch (error) {
+    const message = error?.message || String(error);
+    console.error("[DB] MongoDB connection FAILED:", message);
+    if (error?.reason) {
+      console.error("[DB] MongoDB failure reason:", error.reason);
+    }
+    throw error;
+  }
+}
+
+function isDatabaseConnected() {
+  return mongoose.connection.readyState === 1;
 }
 
 async function disconnectDatabase() {
@@ -49,4 +74,5 @@ module.exports = {
   mongoose,
   connectDatabase,
   disconnectDatabase,
+  isDatabaseConnected,
 };
