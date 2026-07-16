@@ -42,6 +42,13 @@ const {
   USER_STORAGE_LIMIT_MESSAGE,
 } = require("./services/tenantStorage");
 const { attachApiAuth, requireMasterKey } = require("./services/auth");
+const {
+  getClientIp,
+  assertLoginAllowed,
+  recordLoginFailure,
+  clearLoginFailures,
+  verifyCaptchaToken,
+} = require("./services/loginProtection");
 const { requireAuth, requireAdmin, signUserToken } = require("./services/jwtAuth");
 const {
   verifyUserFace,
@@ -959,6 +966,16 @@ app.use(express.static(PUBLIC_DIR));
 
 async function loginHandler(req, res) {
   try {
+    const clientIp = getClientIp(req);
+    const gate = assertLoginAllowed(clientIp);
+
+    if (gate.blocked) {
+      if (gate.retryAfterSec) {
+        res.set("Retry-After", String(gate.retryAfterSec));
+      }
+      return res.status(gate.status).json(gate.body);
+    }
+
     const username = String(req.body?.username || "").trim();
     const password = String(req.body?.password || "");
 
@@ -969,15 +986,48 @@ async function loginHandler(req, res) {
       });
     }
 
+    if (gate.requireCaptcha) {
+      const captchaToken = req.body?.captchaToken;
+      const captchaOk = await verifyCaptchaToken(captchaToken, clientIp);
+      if (!captchaOk) {
+        return res.status(403).json({
+          success: false,
+          requireCaptcha: true,
+          message: "Too many failed attempts. Please solve the CAPTCHA.",
+        });
+      }
+    }
+
     if (returnIfMongoDisconnected(res)) return;
 
     const authResult = await verifyUserCredentials(username, password);
     if (!authResult) {
-      return res.status(401).json({
+      const failure = recordLoginFailure(clientIp);
+
+      if (failure.isHardLocked) {
+        const retryAfterSec = Math.max(
+          1,
+          Math.ceil((failure.lockedUntil - Date.now()) / 1000)
+        );
+        res.set("Retry-After", String(retryAfterSec));
+        return res.status(429).json({
+          success: false,
+          message: "Too many failed login attempts. Please try again later.",
+          retryAfterSec,
+        });
+      }
+
+      const body = {
         success: false,
-        message: "Invalid credentials",
-      });
+        message: "Invalid username or password",
+      };
+      if (failure.requireCaptcha) {
+        body.requireCaptcha = true;
+      }
+      return res.status(401).json(body);
     }
+
+    clearLoginFailures(clientIp);
 
     const { user, company } = authResult;
 
