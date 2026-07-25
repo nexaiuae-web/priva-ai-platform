@@ -113,15 +113,11 @@ async function verifyOtp(email, otpCode) {
 }
 
 async function sendOtpEmail(email, code) {
-  const smtpHost = String(process.env.SMTP_HOST || "").trim();
-  const port = Number(process.env.SMTP_PORT) || 587;
-  const smtpUser = String(process.env.SMTP_USER || "").trim();
-  const smtpPass = String(process.env.SMTP_PASS || "").trim();
-  const smtpFrom = String(process.env.SMTP_FROM || smtpUser || "noreply@priva-ai.com").trim();
+  const brevoKey = String(process.env.BREVO_API_KEY || process.env.SMTP_PASS || "").trim();
 
-  if (!smtpHost || !smtpUser) {
+  if (!brevoKey) {
     console.log(`[OTP] ═══════════════════════════════════════════════`);
-    console.log(`[OTP] SMTP not configured — MOCK MODE`);
+    console.log(`[OTP] BREVO_API_KEY not configured — MOCK MODE`);
     console.log(`[OTP] To: ${email}`);
     console.log(`[OTP] OTP Code: ${code}`);
     console.log(`[OTP] Expires in: 10 minutes`);
@@ -130,37 +126,31 @@ async function sendOtpEmail(email, code) {
   }
 
   try {
-    const nodemailer = require("nodemailer");
-    const transporter = nodemailer.createTransport({
-      host: smtpHost,
-      port,
-      secure: port === 465,
-      auth: {
-        user: smtpUser,
-        pass: smtpPass,
+    const payload = {
+      sender: { name: "PRIVA AI", email: "a.bouden2010@gmail.com" },
+      to: [{ email }],
+      subject: "Your Verification Code - PRIVA AI",
+      htmlContent:
+        `<p>Your verification code is: <strong>${code}</strong></p>`,
+    };
+
+    const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: {
+        "api-key": brevoKey,
+        "Content-Type": "application/json",
       },
-      connectionTimeout: 8000,
-      greetingTimeout: 5000,
-      socketTimeout: 8000,
+      body: JSON.stringify(payload),
     });
 
-    await transporter.sendMail({
-      from: smtpFrom,
-      to: email,
-      subject: "PRIVA-AI — Your Verification Code",
-      text: `Your verification code is: ${code}\n\nThis code expires in 10 minutes.\n\nIf you did not request this, please ignore this email.`,
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
-          <h2 style="color: #333;">PRIVA-AI Verification</h2>
-          <p style="color: #555; font-size: 16px;">Your verification code is:</p>
-          <div style="background: #f4f4f4; border-radius: 8px; padding: 16px; text-align: center; margin: 16px 0;">
-            <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #333;">${code}</span>
-          </div>
-          <p style="color: #888; font-size: 14px;">This code expires in 10 minutes.</p>
-          <p style="color: #888; font-size: 14px;">If you did not request this, please ignore this email.</p>
-        </div>
-      `,
-    });
+    if (!response.ok) {
+      const errorBody = await response.text();
+      console.error(
+        `[SMTP ERROR] Brevo API ${response.status} ${response.statusText} —`,
+        errorBody
+      );
+      throw new Error(`Brevo API error: ${response.status}`);
+    }
 
     console.log(`[OTP] Email sent to ${email}`);
     return { sent: true, mock: false };
