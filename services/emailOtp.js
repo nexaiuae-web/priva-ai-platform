@@ -114,7 +114,7 @@ async function verifyOtp(email, otpCode) {
 
 async function sendOtpEmail(email, code) {
   const smtpHost = String(process.env.SMTP_HOST || "").trim();
-  const smtpPort = parseInt(process.env.SMTP_PORT || "587", 10);
+  const port = Number(process.env.SMTP_PORT) || 587;
   const smtpUser = String(process.env.SMTP_USER || "").trim();
   const smtpPass = String(process.env.SMTP_PASS || "").trim();
   const smtpFrom = String(process.env.SMTP_FROM || smtpUser || "noreply@priva-ai.com").trim();
@@ -133,12 +133,15 @@ async function sendOtpEmail(email, code) {
     const nodemailer = require("nodemailer");
     const transporter = nodemailer.createTransport({
       host: smtpHost,
-      port: smtpPort,
-      secure: smtpPort === 465,
+      port,
+      secure: port === 465,
       auth: {
         user: smtpUser,
         pass: smtpPass,
       },
+      connectionTimeout: 8000,
+      greetingTimeout: 5000,
+      socketTimeout: 8000,
     });
 
     await transporter.sendMail({
@@ -161,8 +164,8 @@ async function sendOtpEmail(email, code) {
 
     console.log(`[OTP] Email sent to ${email}`);
     return { sent: true, mock: false };
-  } catch (error) {
-    console.error(`[OTP] Failed to send email to ${email}:`, error.message);
+  } catch (err) {
+    console.error(`[SMTP ERROR]`, err);
     console.log(`[OTP] ═══════════════════════════════════════════════`);
     console.log(`[OTP] Falling back to MOCK MODE`);
     console.log(`[OTP] To: ${email}`);
