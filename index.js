@@ -156,6 +156,22 @@ const {
   attachTrialAuthContext,
 } = require("./services/trialTracker");
 const {
+  isEmailValid,
+  normalizeEmail,
+  checkOtpRateLimit,
+  storeOtp,
+  verifyOtp: verifyOtpCode,
+  sendOtpEmail,
+  signTrialToken,
+  isTrialAccessToken,
+} = require("./services/emailOtp");
+const {
+  getOrCreateTrialUser,
+  getQuota: getTrialEmailQuota,
+  enforceTrialChatQuota,
+  enforceTrialUploadQuota,
+} = require("./services/trialEmailQuota");
+const {
   getUploadStagingDir,
   useMongoVectorStore,
   useMongoTenants,
@@ -1713,7 +1729,7 @@ adminRouter.delete("/companies/:id", requireAuth, requireAdmin, async (req, res,
 // ============================================
 // 📤 Document upload & list (/api/documents + /api/upload)
 // ============================================
-uploadRouter.post("/", documentUploadMiddleware, checkTrialUploadLimits, acceptDocumentUpload);
+uploadRouter.post("/", documentUploadMiddleware, checkTrialUploadLimits, enforceTrialUploadQuota, acceptDocumentUpload);
 
 function serializeUploadJob(job) {
   return {
@@ -1850,7 +1866,7 @@ documentsRouter.get("/", listDocumentsHandler);
 documentsRouter.get("/uploads/active", listActiveUploadsHandler);
 documentsRouter.get("/upload-status/:jobId", uploadStatusHandler);
 documentsRouter.get("/status/:uploadId", uploadStatusHandler);
-documentsRouter.post("/", documentUploadMiddleware, checkTrialUploadLimits, acceptDocumentUpload);
+documentsRouter.post("/", documentUploadMiddleware, checkTrialUploadLimits, enforceTrialUploadQuota, acceptDocumentUpload);
 
 documentsRouter.patch("/:id/move", moveDocumentHandler);
 documentsRouter.delete("/:id", requireMasterKey, deleteDocumentHandler);
@@ -2121,13 +2137,16 @@ function requireChatFullAuth(req, res, next) {
   if (isTrialModeRequest(req)) {
     return next();
   }
+  if (req.auth?.token_type === "trial_access" && req.auth?.jwtPayload?.is_trial) {
+    return next();
+  }
   return requireFaceVerified(req, res, next);
 }
 
 chatRouter.use(requireChatFullAuth);
 chatRouter.get("/history", chatHistoryHandler);
 
-chatRouter.post("/", async (req, res, next) => {
+chatRouter.post("/", enforceTrialChatQuota, async (req, res, next) => {
   console.log("\n========== [CHAT] REQUEST RECEIVED ==========");
   console.log("[CHAT] Timestamp:", new Date().toISOString());
   console.log("[CHAT] Headers:", {
@@ -2655,17 +2674,160 @@ async function verifyFaceHandler(req, res, next) {
 const authRouter = express.Router();
 authRouter.post("/verify-face", requireVerifyFaceToken, verifyFaceHandler);
 
+// ============================================
+// Email OTP Auth — public endpoints (no JWT required)
+// Mounted at /api/auth BEFORE the authenticated apiRouter
+// ============================================
+const publicAuthRouter = express.Router();
+
+publicAuthRouter.post("/send-otp", async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+    if (!email || !isEmailValid(email)) {
+      return res.status(400).json({
+        error: "VALID_EMAIL_REQUIRED",
+        message: "A valid email address is required.",
+      });
+    }
+
+    const rateCheck = await checkOtpRateLimit(email);
+    if (!rateCheck.allowed) {
+      return res.status(429).json({
+        error: "OTP_RATE_LIMITED",
+        code: "OTP_RATE_LIMITED",
+        message: "Too many OTP requests. Please try again later.",
+        retry_after_ms: rateCheck.retryAfterMs,
+        retry_after_seconds: Math.ceil(rateCheck.retryAfterMs / 1000),
+      });
+    }
+
+    const { code } = await storeOtp(email);
+    const sendResult = await sendOtpEmail(email, code);
+
+    console.log(`[OTP] Sent OTP to ${email} | mock=${sendResult.mock}`);
+
+    return res.status(200).json({
+      success: true,
+      message: "OTP sent to email.",
+      expires_in: 600,
+    });
+  } catch (error) {
+    console.error("[OTP] send-otp error:", error.message);
+    return res.status(500).json({
+      error: "OTP_SEND_FAILED",
+      message: "Failed to send OTP. Please try again.",
+    });
+  }
+});
+
+publicAuthRouter.post("/verify-otp", async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+    const otp = String(req.body?.otp || "").trim();
+
+    if (!email || !isEmailValid(email)) {
+      return res.status(400).json({
+        error: "VALID_EMAIL_REQUIRED",
+        message: "A valid email address is required.",
+      });
+    }
+
+    if (!otp || !/^\d{6}$/.test(otp)) {
+      return res.status(400).json({
+        error: "VALID_OTP_REQUIRED",
+        message: "A 6-digit OTP code is required.",
+      });
+    }
+
+    const result = await verifyOtpCode(email, otp);
+    if (!result.valid) {
+      return res.status(401).json({
+        error: "INVALID_OTP",
+        code: "INVALID_OTP",
+        message: result.reason || "Invalid or expired OTP.",
+      });
+    }
+
+    const trialUser = await getOrCreateTrialUser(email);
+    const { token, jti, expiresAt, company_id } = await signTrialToken(email);
+
+    console.log(`[OTP] Verified OTP for ${email} | company_id=${company_id}`);
+
+    return res.status(200).json({
+      success: true,
+      token,
+      access_token: token,
+      token_type: "trial",
+      email,
+      company_id,
+      expires_at: expiresAt,
+      trial: {
+        queries_used: trialUser.queries_used,
+        queries_limit: 5,
+        remaining_queries: Math.max(0, 5 - (trialUser.queries_used || 0)),
+        storage_used_bytes: trialUser.storage_used_bytes,
+        max_storage_bytes: 5 * 1024 * 1024,
+      },
+    });
+  } catch (error) {
+    console.error("[OTP] verify-otp error:", error.message);
+    return res.status(500).json({
+      error: "OTP_VERIFY_FAILED",
+      message: "Failed to verify OTP. Please try again.",
+    });
+  }
+});
+
 // Canonical Stage-2 path + legacy /api/auth/verify-face alias
 apiRouter.post("/verify-face", requireVerifyFaceToken, verifyFaceHandler);
 apiRouter.use("/auth", authRouter);
 apiRouter.use("/chat", chatRouter);
 apiRouter.use("/upload", uploadRouter);
 apiRouter.use("/documents", documentsRouter);
+
+// Trial quota endpoint — requires trial JWT or existing trial mode
+const trialQuotaRouter = express.Router();
+trialQuotaRouter.get("/quota", async (req, res) => {
+  try {
+    const email = req.auth.jwtPayload?.email || req.auth.user?.id;
+    if (req.auth?.token_type === "trial_access" && req.auth?.jwtPayload?.is_trial && email) {
+      const quota = await getTrialEmailQuota(email);
+      return res.status(200).json({
+        email: quota.email,
+        queriesUsed: quota.queries_used,
+        queriesLimit: quota.queries_limit,
+        storageUsedBytes: quota.storage_used_bytes,
+        maxStorageBytes: quota.max_storage_bytes,
+        remainingQueries: quota.remaining_queries,
+        windowResetAt: quota.window_reset_at,
+      });
+    }
+    if (isTrialModeRequest(req)) {
+      const status = await getTrialStatusFromRequest(req);
+      return res.status(200).json(status);
+    }
+    return res.status(401).json({
+      error: "Trial authentication required.",
+      hint: "Send a trial JWT via Authorization: Bearer <token> or use x-plan-mode: trial header.",
+    });
+  } catch (error) {
+    console.error("[TRIAL] quota error:", error.message);
+    return res.status(500).json({
+      error: "TRIAL_QUOTA_FETCH_FAILED",
+      message: "Failed to fetch trial quota.",
+    });
+  }
+});
+apiRouter.use("/trial", trialQuotaRouter);
+
 const foldersRouter = express.Router();
 foldersRouter.get("/", listFoldersHandler);
 foldersRouter.post("/", createFolderHandler);
 apiRouter.use("/folders", foldersRouter);
 apiRouter.use("/admin", adminRouter);
+
+// Mount public OTP auth routes at /api/auth (BEFORE authenticated /api router)
+app.use("/api/auth", publicAuthRouter);
 app.use("/api", apiRouter);
 
 // Legacy paths (backward compatibility) — same API auth stack
