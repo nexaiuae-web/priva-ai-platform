@@ -368,6 +368,23 @@ async function createUserSession({ user_id, company_id, jti, expires_at }) {
   return session;
 }
 
+async function findSessionByJti(jti) {
+  const key = String(jti || "").trim();
+  if (!key) return null;
+  return UserSession.findOne({ jti: key }).lean();
+}
+
+async function revokeSessionByJti(jti) {
+  const key = String(jti || "").trim();
+  if (!key) return false;
+  const result = await UserSession.deleteOne({ jti: key });
+  const deleted = Number(result?.deletedCount || 0) > 0;
+  if (deleted) {
+    console.log("[TENANT/MONGO] Revoked user session | jti:", key);
+  }
+  return deleted;
+}
+
 async function ensureDefaultAdminUser() {
   const passwordHash = sqliteHelpers.hashPassword(DEFAULT_ADMIN_PASSWORD);
   let company = (await listCompanies())[0];
@@ -452,4 +469,6 @@ module.exports = {
   verifyUserCredentials,
   publicUser: sqliteHelpers.publicUser,
   createUserSession,
+  findSessionByJti,
+  revokeSessionByJti,
 };

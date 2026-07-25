@@ -49,7 +49,15 @@ const {
   clearLoginFailures,
   verifyCaptchaToken,
 } = require("./services/loginProtection");
-const { requireAuth, requireAdmin, signUserToken } = require("./services/jwtAuth");
+const {
+  requireAuth,
+  requireAdmin,
+  requireVerifyFaceToken,
+  requireFaceVerified,
+  signPreAuthToken,
+  signAccessToken,
+  extractBearerToken,
+} = require("./services/jwtAuth");
 const {
   verifyUserFace,
   registerAdminFaceProfiles,
@@ -74,6 +82,8 @@ const {
   updateCompanyLimits,
   verifyUserCredentials,
   createUserSession,
+  findSessionByJti,
+  revokeSessionByJti,
   findUserById,
   isSystemAdminAccount,
   listUsersForAdmin,
@@ -1031,14 +1041,6 @@ async function loginHandler(req, res) {
 
     const { user, company } = authResult;
 
-    const { token, jti, expiresAt } = signUserToken(user, company);
-    await createUserSession({
-      user_id: user.id,
-      company_id: company.id,
-      jti,
-      expires_at: expiresAt,
-    });
-
     const faceBypassConfigured = /^true$/i.test(
       String(process.env.E2E_FACE_BYPASS_ENABLED || "false").trim()
     );
@@ -1049,11 +1051,51 @@ async function loginHandler(req, res) {
     const shouldBypassFaceForUser =
       faceBypassConfigured && faceBypassUsers.includes(String(user.username || "").toLowerCase());
 
+    // E2E face bypass: issue a full access_token so automated flows can skip Stage 2.
+    if (shouldBypassFaceForUser) {
+      const { token, jti, expiresAt } = signAccessToken(user, company);
+      await createUserSession({
+        user_id: user.id,
+        company_id: company.id,
+        jti,
+        expires_at: expiresAt,
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "Login successful",
+        token,
+        access_token: token,
+        pre_auth_token: null,
+        token_type: "access",
+        face_verification_bypassed: true,
+        user: {
+          username: user.username,
+          role: user.role,
+          company_id: company.id,
+          company_name: company.company_name,
+        },
+      });
+    }
+
+    // Stage 1 — short-lived pre_auth_token (no chat / protected API access).
+    const { token: preAuthToken, jti, expiresAt } = signPreAuthToken(user, company);
+    await createUserSession({
+      user_id: user.id,
+      company_id: company.id,
+      jti,
+      expires_at: expiresAt,
+    });
+
     return res.status(200).json({
       success: true,
       message: "Login successful",
-      token,
-      face_verification_bypassed: shouldBypassFaceForUser,
+      token: preAuthToken,
+      pre_auth_token: preAuthToken,
+      access_token: null,
+      token_type: "pre_auth",
+      step: "FACE_ID_REQUIRED",
+      face_verification_bypassed: false,
       user: {
         username: user.username,
         role: user.role,
@@ -2071,6 +2113,18 @@ async function chatHistoryHandlerCore(req, res) {
 
 const chatHistoryHandler = wrapRoute(chatHistoryHandlerCore, "CHAT_HISTORY");
 
+/**
+ * Chat endpoints require a Stage-2 access_token with isFaceVerified === true.
+ * Free-trial guests (non-JWT) are exempt and continue through trial quota checks.
+ */
+function requireChatFullAuth(req, res, next) {
+  if (isTrialModeRequest(req)) {
+    return next();
+  }
+  return requireFaceVerified(req, res, next);
+}
+
+chatRouter.use(requireChatFullAuth);
 chatRouter.get("/history", chatHistoryHandler);
 
 chatRouter.post("/", async (req, res, next) => {
@@ -2421,9 +2475,78 @@ apiRouter.get(
 
 apiRouter.post("/login", loginHandler);
 
-const authRouter = express.Router();
-authRouter.post("/verify-face", requireAuth, async (req, res, next) => {
+async function issueAccessTokenAfterFaceVerify(req) {
+  const userId = req.auth?.user?.id;
+  const user =
+    (userId ? await findUserById(userId) : null) ||
+    (req.auth?.user
+      ? {
+          id: req.auth.user.id,
+          username: req.auth.user.username,
+          role: req.auth.user.role,
+          company_id: req.auth.user.company_id,
+        }
+      : null);
+
+  if (!user?.id) {
+    const error = new Error("Authenticated user could not be resolved.");
+    error.status = 401;
+    throw error;
+  }
+
+  const companyId = user.company_id || req.auth?.company_id;
+  const company =
+    (companyId ? await getTenantCompanyById(companyId) : null) || {
+      id: companyId,
+      company_name: req.auth?.user?.company_name || null,
+    };
+
+  // Invalidate Stage-1 pre_auth_token (session jti) before minting access_token.
+  const preAuthJti = req.auth?.jti;
+  if (preAuthJti) {
+    const existing = await findSessionByJti(preAuthJti);
+    if (!existing) {
+      console.warn("[AUTH] pre_auth session already revoked or missing | jti:", preAuthJti);
+      const error = new Error("Pre-authentication token has already been used or revoked.");
+      error.status = 401;
+      error.code = "PRE_AUTH_REVOKED";
+      throw error;
+    }
+    await revokeSessionByJti(preAuthJti);
+  }
+
+  const { token, jti, expiresAt } = signAccessToken(user, company);
+  await createUserSession({
+    user_id: user.id,
+    company_id: company.id || companyId,
+    jti,
+    expires_at: expiresAt,
+  });
+
+  return { accessToken: token, jti, expiresAt, user, company };
+}
+
+async function verifyFaceHandler(req, res, next) {
   try {
+    // Idempotent: caller already holds a Stage-2 access_token (e.g. E2E login bypass).
+    if (req.auth?.alreadyFaceVerified) {
+      const existingAccess = extractBearerToken(req);
+      return res.status(200).json({
+        success: true,
+        message: "Face verification already completed.",
+        token: existingAccess,
+        access_token: existingAccess,
+        token_type: "access",
+        match_score: 100,
+        distance: 0,
+        threshold: 1,
+        references_compared: 1,
+        matched_reference_index: 0,
+        gallery_adapted: false,
+        private_local_inference: true,
+      });
+    }
+
     const faceBypassConfigured = /^true$/i.test(
       String(process.env.E2E_FACE_BYPASS_ENABLED || "false").trim()
     );
@@ -2434,10 +2557,15 @@ authRouter.post("/verify-face", requireAuth, async (req, res, next) => {
     const authUsername = String(req.auth?.user?.username || "").toLowerCase();
     const shouldBypassFaceForUser =
       faceBypassConfigured && faceBypassUsers.includes(authUsername);
+
     if (shouldBypassFaceForUser) {
+      const { accessToken } = await issueAccessTokenAfterFaceVerify(req);
       return res.status(200).json({
         success: true,
         message: "Face verification bypassed for E2E test user.",
+        token: accessToken,
+        access_token: accessToken,
+        token_type: "access",
         match_score: 100,
         distance: 0,
         threshold: 1,
@@ -2481,9 +2609,14 @@ authRouter.post("/verify-face", requireAuth, async (req, res, next) => {
       });
     }
 
+    const { accessToken } = await issueAccessTokenAfterFaceVerify(req);
+
     return res.status(200).json({
       success: true,
       message: "Face verification successful.",
+      token: accessToken,
+      access_token: accessToken,
+      token_type: "access",
       match_score: result.match_score,
       distance: result.distance,
       threshold: result.threshold,
@@ -2494,6 +2627,13 @@ authRouter.post("/verify-face", requireAuth, async (req, res, next) => {
     });
   } catch (error) {
     console.error("[FACE] verify-face error:", error.message);
+    if (error.status === 401 || error.code === "PRE_AUTH_REVOKED") {
+      return res.status(401).json({
+        success: false,
+        error: error.code || "UNAUTHORIZED",
+        message: error.message || "Full authentication required",
+      });
+    }
     if (error.code === "FACE_PROFILE_NOT_CONFIGURED") {
       return res.status(403).json({
         success: false,
@@ -2510,8 +2650,13 @@ authRouter.post("/verify-face", requireAuth, async (req, res, next) => {
     }
     return next(error);
   }
-});
+}
 
+const authRouter = express.Router();
+authRouter.post("/verify-face", requireVerifyFaceToken, verifyFaceHandler);
+
+// Canonical Stage-2 path + legacy /api/auth/verify-face alias
+apiRouter.post("/verify-face", requireVerifyFaceToken, verifyFaceHandler);
 apiRouter.use("/auth", authRouter);
 apiRouter.use("/chat", chatRouter);
 apiRouter.use("/upload", uploadRouter);

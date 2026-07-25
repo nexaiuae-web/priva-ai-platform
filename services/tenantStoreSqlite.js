@@ -369,6 +369,25 @@ function createUserSession({ user_id, company_id, jti, expires_at }) {
   return session;
 }
 
+function findSessionByJti(jti) {
+  const key = String(jti || "").trim();
+  if (!key) return null;
+  const db = getDb();
+  return db.prepare(`SELECT * FROM user_sessions WHERE jti = ?`).get(key) || null;
+}
+
+function revokeSessionByJti(jti) {
+  const key = String(jti || "").trim();
+  if (!key) return false;
+  const db = getDb();
+  const result = db.prepare(`DELETE FROM user_sessions WHERE jti = ?`).run(key);
+  const deleted = Number(result?.changes || 0) > 0;
+  if (deleted) {
+    console.log("[TENANT/SQLITE] Revoked user session | jti:", key);
+  }
+  return deleted;
+}
+
 function listCompaniesWithStats() {
   return listCompanies().map((company) => ({
     ...company,
@@ -690,6 +709,8 @@ module.exports = {
   verifyUserCredentials,
   publicUser,
   createUserSession,
+  findSessionByJti,
+  revokeSessionByJti,
   hashPassword,
   verifyPassword,
   parseUserStorageLimitMb,
