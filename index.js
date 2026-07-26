@@ -309,6 +309,8 @@ app.get("/api/health", (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 
+const SERVER_URL = process.env.RENDER_EXTERNAL_URL || "https://your-render-service-url.onrender.com";
+
 const PUBLIC_DIR = path.join(__dirname, "public");
 
 // ============================================
@@ -3098,6 +3100,15 @@ async function initializeBackgroundServices() {
     console.log(`🤖 Ollama: ${process.env.OLLAMA_URL || "http://127.0.0.1:11434"}`);
     console.log(`💬 Chat model: ${getChatModel()} | 📐 Embed model: ${getPrimaryEmbedModel()}`);
     console.log(`\n✅ Ready for requests.\n`);
+
+    setInterval(async () => {
+      try {
+        const res = await fetch(`${SERVER_URL}/api/health`);
+        console.log(`[KEEP-ALIVE] Ping ${SERVER_URL}/api/health → ${res.status}`);
+      } catch (err) {
+        console.error(`[KEEP-ALIVE] Ping failed: ${err.message}`);
+      }
+    }, 10 * 60 * 1000);
   });
 
   // Non-blocking background init — server listens even if DB/Chroma/face preload is slow or fails.
