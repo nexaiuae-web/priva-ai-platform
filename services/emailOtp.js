@@ -127,7 +127,7 @@ async function sendOtpEmail(email, code) {
 
   try {
     const payload = {
-      sender: { name: "PRIVA AI", email: "a.bouden2010@gmail.com" },
+      sender: { name: process.env.SENDER_NAME || "PRIVA AI", email: process.env.SENDER_EMAIL || "privaai.uae@gmail.com" },
       to: [{ email }],
       subject: "Your Verification Code - PRIVA AI",
       htmlContent:
