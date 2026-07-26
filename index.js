@@ -2794,12 +2794,12 @@ trialQuotaRouter.get("/quota", async (req, res) => {
       const quota = await getTrialEmailQuota(email);
       return res.status(200).json({
         email: quota.email,
-        queriesUsed: quota.queries_used,
-        queriesLimit: quota.queries_limit,
-        storageUsedBytes: quota.storage_used_bytes,
-        maxStorageBytes: quota.max_storage_bytes,
-        remainingQueries: quota.remaining_queries,
-        windowResetAt: quota.window_reset_at,
+        queries_used: Number(quota.queries_used) || 0,
+        queries_limit: Number(quota.queries_limit) || 5,
+        storage_used_bytes: Number(quota.storage_used_bytes) || 0,
+        storage_limit_bytes: Number(quota.max_storage_bytes) || 5 * 1024 * 1024,
+        remaining_queries: Number(quota.remaining_queries) || 0,
+        window_reset_at: quota.window_reset_at || null,
       });
     }
     if (isTrialModeRequest(req)) {
