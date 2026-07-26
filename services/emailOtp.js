@@ -130,8 +130,91 @@ async function sendOtpEmail(email, code) {
       sender: { name: process.env.SENDER_NAME || "PRIVA AI", email: process.env.SENDER_EMAIL || "privaai.uae@gmail.com" },
       to: [{ email }],
       subject: "Your Verification Code - PRIVA AI",
-      htmlContent:
-        `<p>Your verification code is: <strong>${code}</strong></p>`,
+      htmlContent: `
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background-color:#0f172a;font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#0f172a;padding:40px 16px;">
+    <tr><td align="center">
+      <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="max-width:480px;width:100%;background-color:#1e293b;border-radius:16px;border:1px solid #334155;overflow:hidden;">
+
+        <!-- Header -->
+        <tr><td style="padding:36px 40px 24px;text-align:center;">
+          <div style="font-size:26px;font-weight:700;letter-spacing:1px;background:linear-gradient(135deg,#60a5fa,#a78bfa,#f472b6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;">
+            PRIVA AI
+          </div>
+          <div style="margin-top:6px;font-size:12px;color:#64748b;letter-spacing:3px;text-transform:uppercase;">
+            Secure Verification
+          </div>
+        </td></tr>
+
+        <!-- Divider -->
+        <tr><td style="padding:0 40px;">
+          <div style="height:1px;background:linear-gradient(90deg,transparent,#334155,transparent);"></div>
+        </td></tr>
+
+        <!-- Title -->
+        <tr><td style="padding:32px 40px 8px;text-align:center;">
+          <h1 style="margin:0;font-size:22px;font-weight:600;color:#f1f5f9;">
+            Verification Code
+          </h1>
+          <p style="margin:6px 0 0;font-size:15px;color:#94a3b8;">
+            رمز التحقق
+          </p>
+        </td></tr>
+
+        <!-- Subtext -->
+        <tr><td style="padding:12px 40px 0;text-align:center;">
+          <p style="margin:0;font-size:14px;line-height:22px;color:#94a3b8;">
+            Use the code below to activate your free trial. This code is required to verify your email address and unlock full access.
+          </p>
+        </td></tr>
+
+        <!-- OTP Box -->
+        <tr><td style="padding:28px 40px 0;" align="center">
+          <div style="display:inline-block;padding:18px 44px;background-color:#0f172a;border:2px solid #60a5fa;border-radius:12px;box-shadow:0 0 20px rgba(96,165,250,0.15);">
+            <span style="font-family:'Courier New',Courier,monospace;font-size:36px;font-weight:700;letter-spacing:14px;color:#f1f5f9;">
+              ${code}
+            </span>
+          </div>
+        </td></tr>
+
+        <!-- Expiry -->
+        <tr><td style="padding:20px 40px 0;text-align:center;">
+          <p style="margin:0;font-size:13px;color:#64748b;">
+            This code expires in <strong style="color:#94a3b8;">10 minutes</strong>.
+          </p>
+        </td></tr>
+
+        <!-- Divider -->
+        <tr><td style="padding:28px 40px 0;">
+          <div style="height:1px;background:linear-gradient(90deg,transparent,#334155,transparent);"></div>
+        </td></tr>
+
+        <!-- Security Note -->
+        <tr><td style="padding:20px 40px 0;" align="center">
+          <table role="presentation" cellpadding="0" cellspacing="0" style="background-color:#0f172a;border-radius:8px;border:1px solid #334155;">
+            <tr><td style="padding:12px 20px;">
+              <p style="margin:0;font-size:12px;line-height:18px;color:#64748b;text-align:center;">
+                &#9888; If you didn&rsquo;t request this code, please ignore this email. Your account will not be affected.
+              </p>
+            </td></tr>
+          </table>
+        </td></tr>
+
+        <!-- Footer -->
+        <tr><td style="padding:24px 40px 32px;text-align:center;">
+          <p style="margin:0;font-size:11px;color:#475569;">
+            &copy; 2026 PRIVA AI &mdash; All rights reserved.
+          </p>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`.trim(),
     };
 
     const response = await fetch("https://api.brevo.com/v3/smtp/email", {
