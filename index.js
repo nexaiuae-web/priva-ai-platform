@@ -303,6 +303,10 @@ const OTP_AUTH_LIMIT = rateLimit({
   },
 });
 
+app.get("/api/health", (req, res) => {
+  res.status(200).json({ status: "ok", uptime: process.uptime() });
+});
+
 const PORT = process.env.PORT || 10000;
 
 const PUBLIC_DIR = path.join(__dirname, "public");
