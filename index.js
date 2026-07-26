@@ -7,6 +7,8 @@ const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
 
 // ✅ استبدال LangChain بـ ChromaDB Native Client
 const { CHROMA_DATA_DIR, ensureChromaServer } = require("./services/chromaClient");
@@ -248,6 +250,8 @@ const CORS_ORIGINS = String(
   .map((o) => o.trim())
   .filter(Boolean);
 
+app.use(helmet());
+
 app.use(
   cors({
     origin(origin, callback) {
@@ -268,6 +272,36 @@ app.use(
     ],
   })
 );
+
+// ============================================
+// Rate Limiters
+// ============================================
+
+const GENERAL_API_LIMIT = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: "RATE_LIMITED",
+    code: "RATE_LIMITED",
+    message: "Too many requests. Please try again later.",
+    message_ar: "طلبات كثيرة جداً. يرجى المحاولة مرة أخرى لاحقاً.",
+  },
+});
+
+const OTP_AUTH_LIMIT = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: "OTP_RATE_LIMITED",
+    code: "OTP_RATE_LIMITED",
+    message: "Too many OTP requests from this IP. Please try again in 1 hour.",
+    message_ar: "طلبات كثيرة جداً من هذا العنوان. يرجى المحاولة مرة أخرى بعد ساعة.",
+  },
+});
 
 const PORT = process.env.PORT || 10000;
 
@@ -351,6 +385,61 @@ if (!fs.existsSync(CHROMA_DATA_DIR)) {
   console.log("[BOOT] Created CHROMA_DATA_DIR:", CHROMA_DATA_DIR);
 }
 
+const ALLOWED_DOC_EXTENSIONS = new Set([
+  ".pdf", ".txt", ".docx", ".doc", ".csv", ".xlsx", ".xls",
+  ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff",
+]);
+
+const ALLOWED_DOC_MIMES = new Set([
+  "application/pdf",
+  "text/plain",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "text/csv",
+  "application/csv",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-excel",
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "image/bmp",
+  "image/tiff",
+]);
+
+const BLOCKED_DOC_EXTENSIONS = new Set([
+  ".exe", ".bat", ".cmd", ".sh", ".bash", ".ps1",
+  ".php", ".php3", ".php4", ".php5", ".phtml",
+  ".js", ".mjs", ".cjs", ".ts",
+  ".py", ".pyc", ".pyo",
+  ".rb", ".pl", ".cgi",
+  ".jsp", ".asp", ".aspx", ".cshtml",
+  ".dll", ".so", ".dylib",
+  ".com", ".scr", ".vbs", ".vbe", ".wsf", ".wsh",
+  ".msi", ".msp", ".mst",
+  ".jar", ".class",
+  ".sh", ".bash", ".zsh", ".csh", ".ksh",
+]);
+
+function documentFileFilter(_req, file, cb) {
+  const ext = path.extname(String(file.originalname || "")).toLowerCase();
+  const mime = String(file.mimetype || "").toLowerCase().split(";")[0].trim();
+
+  if (BLOCKED_DOC_EXTENSIONS.has(ext)) {
+    return cb(new Error("This file type is not allowed for security reasons."));
+  }
+
+  if (ALLOWED_DOC_EXTENSIONS.has(ext) && ALLOWED_DOC_MIMES.has(mime)) {
+    return cb(null, true);
+  }
+
+  if (ALLOWED_DOC_EXTENSIONS.has(ext)) {
+    return cb(null, true);
+  }
+
+  return cb(new Error("File type not allowed. Allowed: PDF, TXT, DOCX, CSV, PNG, JPG."));
+}
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => {
@@ -363,7 +452,8 @@ const upload = multer({
       cb(null, `${uploadId}.bin`);
     },
   }),
-  limits: { fileSize: 5000 * 1024 * 1024 }, // Support up to 5000 MB per single file
+  fileFilter: documentFileFilter,
+  limits: { fileSize: 5000 * 1024 * 1024 },
 });
 
 setDocumentUploadRetriever(retriever);
@@ -2827,8 +2917,8 @@ apiRouter.use("/folders", foldersRouter);
 apiRouter.use("/admin", adminRouter);
 
 // Mount public OTP auth routes at /api/auth (BEFORE authenticated /api router)
-app.use("/api/auth", publicAuthRouter);
-app.use("/api", apiRouter);
+app.use("/api/auth", OTP_AUTH_LIMIT, publicAuthRouter);
+app.use("/api", GENERAL_API_LIMIT, apiRouter);
 
 // Legacy paths (backward compatibility) — same API auth stack
 const legacyAdminRouter = express.Router();
