@@ -2590,6 +2590,20 @@ apiRouter.get(
 
 apiRouter.post("/login", loginHandler);
 
+function cosineSimilarity(vecA, vecB) {
+  if (!Array.isArray(vecA) || !Array.isArray(vecB) || vecA.length !== vecB.length || vecA.length === 0) {
+    return 0;
+  }
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < vecA.length; i++) {
+    dot += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dot / denom;
+}
+
 async function issueAccessTokenAfterFaceVerify(req) {
   const userId = req.auth?.user?.id;
   const user =
@@ -2692,13 +2706,12 @@ async function verifyFaceHandler(req, res, next) {
       });
     }
 
-    const image =
-      req.body?.image ?? req.body?.image_base64 ?? req.body?.face_image ?? req.body?.snapshot;
-    if (!image) {
+    const incomingVector = req.body?.faceEmbeddingVector ?? req.body?.face_embedding_vector;
+    if (!Array.isArray(incomingVector) || incomingVector.length === 0) {
       return res.status(400).json({
         success: false,
-        error: "IMAGE_REQUIRED",
-        message: "image (base64) is required.",
+        error: "EMBEDDING_REQUIRED",
+        message: "faceEmbeddingVector or face_embedding_vector (float array) is required.",
       });
     }
 
@@ -2707,20 +2720,61 @@ async function verifyFaceHandler(req, res, next) {
       return res.status(401).json({ error: "Authentication required." });
     }
 
-    console.log("[FACE] verify-face | user:", req.auth.user.username, "| id:", userId);
+    console.log("[FACE] verify-face (embedding) | user:", req.auth.user.username, "| id:", userId);
 
-    const result = await verifyUserFace(userId, image);
-    if (!result.match) {
+    const UserFaceProfile = require("./models/UserFaceProfile");
+    const profile = await UserFaceProfile.findOne({ user_id: userId }).lean();
+    if (!profile) {
+      return res.status(403).json({
+        success: false,
+        error: "FACE_PROFILE_NOT_CONFIGURED",
+        message: FACE_PROFILE_NOT_CONFIGURED_MESSAGE,
+      });
+    }
+
+    const storedDescriptors = JSON.parse(profile.descriptors_json || "[]");
+    if (!Array.isArray(storedDescriptors) || storedDescriptors.length === 0) {
+      return res.status(403).json({
+        success: false,
+        error: "FACE_PROFILE_NOT_CONFIGURED",
+        message: FACE_PROFILE_NOT_CONFIGURED_MESSAGE,
+      });
+    }
+
+    let bestScore = 0;
+    let bestIndex = -1;
+    const incomingDim = incomingVector.length;
+    for (let i = 0; i < storedDescriptors.length; i++) {
+      if (Array.isArray(storedDescriptors[i])) {
+        if (storedDescriptors[i].length !== incomingDim) {
+          return res.status(400).json({
+            success: false,
+            error: "EMBEDDING_DIMENSION_MISMATCH",
+            message: `Face embedding dimension mismatch: received ${incomingDim}, stored descriptor at index ${i} has ${storedDescriptors[i].length}.`,
+          });
+        }
+        const score = cosineSimilarity(incomingVector, storedDescriptors[i]);
+        if (score > bestScore) {
+          bestScore = score;
+          bestIndex = i;
+        }
+      }
+    }
+
+    const MATCH_THRESHOLD = 0.85;
+    const match = bestScore >= MATCH_THRESHOLD;
+
+    if (!match) {
       return res.status(401).json({
         success: false,
         error: "FACE_VERIFICATION_FAILED",
         message: "Face verification failed. Identity could not be verified.",
-        match_score: result.match_score,
-        distance: result.distance,
-        threshold: result.threshold,
-        max_distance: result.max_distance,
-        references_compared: result.references_compared,
-        best_reference_index: result.best_reference_index,
+        match_score: Math.round(bestScore * 100),
+        distance: 1 - bestScore,
+        threshold: MATCH_THRESHOLD,
+        max_distance: 1 - MATCH_THRESHOLD,
+        references_compared: storedDescriptors.length,
+        best_reference_index: bestIndex,
       });
     }
 
@@ -2732,12 +2786,12 @@ async function verifyFaceHandler(req, res, next) {
       token: accessToken,
       access_token: accessToken,
       token_type: "access",
-      match_score: result.match_score,
-      distance: result.distance,
-      threshold: result.threshold,
-      references_compared: result.references_compared,
-      matched_reference_index: result.matched_reference_index,
-      gallery_adapted: result.gallery_adapted,
+      match_score: Math.round(bestScore * 100),
+      distance: 1 - bestScore,
+      threshold: MATCH_THRESHOLD,
+      references_compared: storedDescriptors.length,
+      matched_reference_index: bestIndex,
+      gallery_adapted: false,
       private_local_inference: true,
     });
   } catch (error) {
