@@ -21,8 +21,10 @@ function getAndClearChallenge(key) {
 
 function getWebAuthnConfig(req) {
   const rpName = "PRIVA AI";
-  const rpId = process.env.RP_ID || req.hostname || "localhost";
-  const origin = process.env.FRONTEND_URL || req.headers.origin || `http://localhost:5173`;
+  const rawOrigin = req.headers.origin || req.headers.referer || "http://localhost:3000";
+  const parsedUrl = new URL(rawOrigin);
+  const rpId = process.env.RP_ID || parsedUrl.hostname;
+  const origin = process.env.FRONTEND_URL || parsedUrl.origin;
   return { rpName, rpId, origin };
 }
 
