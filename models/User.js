@@ -11,6 +11,14 @@ const userSchema = new mongoose.Schema(
     monthly_question_limit: { type: Number, default: null },
     current_month_question_count: { type: Number, default: 0, min: 0 },
     question_quota_month: { type: String, default: "" },
+    passkeys: [
+      {
+        credentialID: { type: String },
+        publicKey: { type: String },
+        counter: { type: Number },
+        transports: [String],
+      },
+    ],
     created_at: { type: Date, default: Date.now },
   },
   { collection: "users", versionKey: false, strict: true }

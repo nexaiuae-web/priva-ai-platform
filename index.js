@@ -54,14 +54,12 @@ const {
 const {
   requireAuth,
   requireAdmin,
-  requireVerifyFaceToken,
   requireFaceVerified,
   signPreAuthToken,
   signAccessToken,
   extractBearerToken,
 } = require("./services/jwtAuth");
 const {
-  verifyUserFace,
   registerAdminFaceProfiles,
   removeFaceProfileForUser,
   loadFaceModels,
@@ -70,8 +68,8 @@ const {
   getFaceReferenceCount,
   isFaceProcessingError,
   MAX_FACE_REFERENCES,
-  FACE_PROFILE_NOT_CONFIGURED_MESSAGE,
 } = require("./services/faceVerification");
+const passkeyAuth = require("./services/passkeyAuth");
 const { startFrontendDevServer } = require("./services/frontendDev");
 const {
   initTenantStore,
@@ -2590,20 +2588,6 @@ apiRouter.get(
 
 apiRouter.post("/login", loginHandler);
 
-function cosineSimilarity(vecA, vecB) {
-  if (!Array.isArray(vecA) || !Array.isArray(vecB) || vecA.length !== vecB.length || vecA.length === 0) {
-    return 0;
-  }
-  let dot = 0, normA = 0, normB = 0;
-  for (let i = 0; i < vecA.length; i++) {
-    dot += vecA[i] * vecB[i];
-    normA += vecA[i] * vecA[i];
-    normB += vecB[i] * vecB[i];
-  }
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  return denom === 0 ? 0 : dot / denom;
-}
-
 async function issueAccessTokenAfterFaceVerify(req) {
   const userId = req.auth?.user?.id;
   const user =
@@ -2655,174 +2639,77 @@ async function issueAccessTokenAfterFaceVerify(req) {
   return { accessToken: token, jti, expiresAt, user, company };
 }
 
-async function verifyFaceHandler(req, res, next) {
+const authRouter = express.Router();
+
+// Passkey registration endpoints (protected — requires existing JWT session)
+authRouter.post("/passkey/register-options", async (req, res, next) => {
   try {
-    // Idempotent: caller already holds a Stage-2 access_token (e.g. E2E login bypass).
-    if (req.auth?.alreadyFaceVerified) {
-      const existingAccess = extractBearerToken(req);
-      return res.status(200).json({
-        success: true,
-        message: "Face verification already completed.",
-        token: existingAccess,
-        access_token: existingAccess,
-        token_type: "access",
-        match_score: 100,
-        distance: 0,
-        threshold: 1,
-        references_compared: 1,
-        matched_reference_index: 0,
-        gallery_adapted: false,
-        private_local_inference: true,
-      });
-    }
-
-    const faceBypassConfigured = /^true$/i.test(
-      String(process.env.E2E_FACE_BYPASS_ENABLED || "false").trim()
-    );
-    const faceBypassUsers = String(process.env.E2E_FACE_BYPASS_USERS || "adam")
-      .split(",")
-      .map((value) => value.trim().toLowerCase())
-      .filter(Boolean);
-    const authUsername = String(req.auth?.user?.username || "").toLowerCase();
-    const shouldBypassFaceForUser =
-      faceBypassConfigured && faceBypassUsers.includes(authUsername);
-
-    if (shouldBypassFaceForUser) {
-      const { accessToken } = await issueAccessTokenAfterFaceVerify(req);
-      return res.status(200).json({
-        success: true,
-        message: "Face verification bypassed for E2E test user.",
-        token: accessToken,
-        access_token: accessToken,
-        token_type: "access",
-        match_score: 100,
-        distance: 0,
-        threshold: 1,
-        references_compared: 1,
-        matched_reference_index: 0,
-        gallery_adapted: false,
-        private_local_inference: true,
-        e2e_face_bypass: true,
-      });
-    }
-
-    const incomingVector = req.body?.faceEmbeddingVector ?? req.body?.face_embedding_vector;
-    if (!Array.isArray(incomingVector) || incomingVector.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: "EMBEDDING_REQUIRED",
-        message: "faceEmbeddingVector or face_embedding_vector (float array) is required.",
-      });
-    }
-
     const userId = req.auth?.user?.id;
-    if (!userId) {
-      return res.status(401).json({ error: "Authentication required." });
-    }
+    if (!userId) return res.status(401).json({ error: "Authentication required." });
 
-    console.log("[FACE] verify-face (embedding) | user:", req.auth.user.username, "| id:", userId);
-
-    const UserFaceProfile = require("./models/UserFaceProfile");
-    const profile = await UserFaceProfile.findOne({ user_id: userId }).lean();
-    if (!profile) {
-      return res.status(403).json({
-        success: false,
-        error: "FACE_PROFILE_NOT_CONFIGURED",
-        message: FACE_PROFILE_NOT_CONFIGURED_MESSAGE,
-      });
-    }
-
-    const storedDescriptors = JSON.parse(profile.descriptors_json || "[]");
-    if (!Array.isArray(storedDescriptors) || storedDescriptors.length === 0) {
-      return res.status(403).json({
-        success: false,
-        error: "FACE_PROFILE_NOT_CONFIGURED",
-        message: FACE_PROFILE_NOT_CONFIGURED_MESSAGE,
-      });
-    }
-
-    let bestScore = 0;
-    let bestIndex = -1;
-    const incomingDim = incomingVector.length;
-    for (let i = 0; i < storedDescriptors.length; i++) {
-      if (Array.isArray(storedDescriptors[i])) {
-        if (storedDescriptors[i].length !== incomingDim) {
-          return res.status(400).json({
-            success: false,
-            error: "EMBEDDING_DIMENSION_MISMATCH",
-            message: `Face embedding dimension mismatch: received ${incomingDim}, stored descriptor at index ${i} has ${storedDescriptors[i].length}.`,
-          });
-        }
-        const score = cosineSimilarity(incomingVector, storedDescriptors[i]);
-        if (score > bestScore) {
-          bestScore = score;
-          bestIndex = i;
-        }
-      }
-    }
-
-    const MATCH_THRESHOLD = 0.85;
-    const match = bestScore >= MATCH_THRESHOLD;
-
-    if (!match) {
-      return res.status(401).json({
-        success: false,
-        error: "FACE_VERIFICATION_FAILED",
-        message: "Face verification failed. Identity could not be verified.",
-        match_score: Math.round(bestScore * 100),
-        distance: 1 - bestScore,
-        threshold: MATCH_THRESHOLD,
-        max_distance: 1 - MATCH_THRESHOLD,
-        references_compared: storedDescriptors.length,
-        best_reference_index: bestIndex,
-      });
-    }
-
-    const { accessToken } = await issueAccessTokenAfterFaceVerify(req);
-
-    return res.status(200).json({
-      success: true,
-      message: "Face verification successful.",
-      token: accessToken,
-      access_token: accessToken,
-      token_type: "access",
-      match_score: Math.round(bestScore * 100),
-      distance: 1 - bestScore,
-      threshold: MATCH_THRESHOLD,
-      references_compared: storedDescriptors.length,
-      matched_reference_index: bestIndex,
-      gallery_adapted: false,
-      private_local_inference: true,
+    const { rpName, rpId } = passkeyAuth.getWebAuthnConfig(req);
+    const options = await passkeyAuth.generateRegistrationOptions({
+      rpName,
+      rpID: rpId,
+      userName: userId,
+      userDisplayName: req.auth.user.username || userId,
+      attestationType: "none",
+      excludeCredentials: [],
     });
+
+    passkeyAuth.storeChallenge(userId, options.challenge);
+
+    return res.status(200).json(options);
   } catch (error) {
-    console.error("[FACE] verify-face error:", error.message);
-    if (error.status === 401 || error.code === "PRE_AUTH_REVOKED") {
-      return res.status(401).json({
-        success: false,
-        error: error.code || "UNAUTHORIZED",
-        message: error.message || "Full authentication required",
-      });
-    }
-    if (error.code === "FACE_PROFILE_NOT_CONFIGURED") {
-      return res.status(403).json({
-        success: false,
-        error: "FACE_PROFILE_NOT_CONFIGURED",
-        message: FACE_PROFILE_NOT_CONFIGURED_MESSAGE,
-      });
-    }
-    if (isFaceProcessingError(error)) {
-      return res.status(400).json({
-        success: false,
-        error: error.code || "NO_FACE_DETECTED",
-        message: error.message,
-      });
-    }
+    console.error("[PASSKEY] register-options error:", error.message);
     return next(error);
   }
-}
+});
 
-const authRouter = express.Router();
-authRouter.post("/verify-face", requireVerifyFaceToken, verifyFaceHandler);
+authRouter.post("/passkey/register-verify", async (req, res, next) => {
+  try {
+    const userId = req.auth?.user?.id;
+    if (!userId) return res.status(401).json({ error: "Authentication required." });
+
+    const credential = req.body;
+    if (!credential || !credential.id || !credential.response) {
+      return res.status(400).json({ error: "Invalid credential response." });
+    }
+
+    const challenge = passkeyAuth.getAndClearChallenge(userId);
+    if (!challenge) {
+      return res.status(400).json({ error: "Registration challenge not found or expired." });
+    }
+
+    const { origin, rpId } = passkeyAuth.getWebAuthnConfig(req);
+    const verification = await passkeyAuth.verifyRegistrationResponse({
+      response: credential,
+      expectedChallenge: challenge,
+      expectedOrigin: origin,
+      expectedRPID: rpId,
+    });
+
+    if (!verification.verified || !verification.registrationInfo) {
+      return res.status(400).json({ error: "Registration verification failed." });
+    }
+
+    const webauthnCred = verification.registrationInfo.credential;
+    const newPasskey = {
+      credentialID: webauthnCred.id,
+      publicKey: Buffer.from(webauthnCred.publicKey).toString("base64url"),
+      counter: webauthnCred.counter,
+      transports: webauthnCred.transports || [],
+    };
+
+    const User = require("./models/User");
+    await User.updateOne({ id: userId }, { $push: { passkeys: newPasskey } });
+
+    return res.status(200).json({ success: true, credentialID: webauthnCred.id });
+  } catch (error) {
+    console.error("[PASSKEY] register-verify error:", error.message);
+    return next(error);
+  }
+});
 
 // ============================================
 // Email OTP Auth — public endpoints (no JWT required)
@@ -2928,8 +2815,127 @@ publicAuthRouter.post("/verify-otp", async (req, res) => {
   }
 });
 
-// Canonical Stage-2 path + legacy /api/auth/verify-face alias
-apiRouter.post("/verify-face", requireVerifyFaceToken, verifyFaceHandler);
+// Passkey login endpoints (public — no JWT required)
+publicAuthRouter.post("/passkey/login-options", async (req, res, next) => {
+  try {
+    const email = req.body?.email;
+    const userId = req.body?.user_id;
+    if (!email && !userId) {
+      return res.status(400).json({ error: "email or user_id is required." });
+    }
+
+    const User = require("./models/User");
+    const user = email
+      ? await User.findOne({ username: email.toLowerCase().trim() })
+      : await User.findOne({ id: userId });
+
+    if (!user || !Array.isArray(user.passkeys) || user.passkeys.length === 0) {
+      return res.status(400).json({ error: "No passkeys registered for this user." });
+    }
+
+    const { rpId } = passkeyAuth.getWebAuthnConfig(req);
+    const allowCredentials = user.passkeys.map((pk) => ({
+      id: pk.credentialID,
+      transports: pk.transports || [],
+    }));
+
+    const options = await passkeyAuth.generateAuthenticationOptions({
+      rpID: rpId,
+      allowCredentials,
+      userVerification: "preferred",
+    });
+
+    const userKey = email || userId;
+    passkeyAuth.storeChallenge(userKey, options.challenge);
+
+    return res.status(200).json(options);
+  } catch (error) {
+    console.error("[PASSKEY] login-options error:", error.message);
+    return next(error);
+  }
+});
+
+publicAuthRouter.post("/passkey/login-verify", async (req, res, next) => {
+  try {
+    const email = req.body?.email;
+    const userId = req.body?.user_id;
+    const credential = req.body?.credential;
+
+    if (!credential || !credential.id || !credential.response) {
+      return res.status(400).json({ error: "Invalid credential response." });
+    }
+
+    const userKey = email || userId;
+    if (!userKey) {
+      return res.status(400).json({ error: "email or user_id is required." });
+    }
+
+    const User = require("./models/User");
+    const user = email
+      ? await User.findOne({ username: email.toLowerCase().trim() })
+      : await User.findOne({ id: userId });
+
+    if (!user) {
+      return res.status(400).json({ error: "User not found." });
+    }
+
+    const passkey = (user.passkeys || []).find((pk) => pk.credentialID === credential.id);
+    if (!passkey) {
+      return res.status(400).json({ error: "Credential not registered for this user." });
+    }
+
+    const challenge = passkeyAuth.getAndClearChallenge(userKey);
+    if (!challenge) {
+      return res.status(400).json({ error: "Authentication challenge not found or expired." });
+    }
+
+    const { origin, rpId } = passkeyAuth.getWebAuthnConfig(req);
+    const verification = await passkeyAuth.verifyAuthenticationResponse({
+      response: credential,
+      expectedChallenge: challenge,
+      expectedOrigin: origin,
+      expectedRPID: rpId,
+      credential: {
+        id: passkey.credentialID,
+        publicKey: Buffer.from(passkey.publicKey, "base64url"),
+        counter: passkey.counter,
+        transports: passkey.transports,
+      },
+    });
+
+    if (!verification.verified) {
+      return res.status(401).json({ error: "Authentication verification failed." });
+    }
+
+    await User.updateOne(
+      { id: user.id, "passkeys.credentialID": passkey.credentialID },
+      { $set: { "passkeys.$.counter": verification.authenticationInfo.newCounter } }
+    );
+
+    req.auth = {
+      user: {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        company_id: user.company_id,
+      },
+      company_id: user.company_id,
+    };
+
+    const { accessToken } = await issueAccessTokenAfterFaceVerify(req);
+
+    return res.status(200).json({
+      success: true,
+      token: accessToken,
+      access_token: accessToken,
+      token_type: "access",
+    });
+  } catch (error) {
+    console.error("[PASSKEY] login-verify error:", error.message);
+    return next(error);
+  }
+});
+
 apiRouter.use("/auth", authRouter);
 apiRouter.use("/chat", chatRouter);
 apiRouter.use("/upload", uploadRouter);
