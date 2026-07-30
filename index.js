@@ -238,6 +238,8 @@ async function retrieveContextsViaChromaNative(
 
 const app = express();
 
+app.set('trust proxy', 1);
+
 app.get('/', (req, res) => { res.status(200).send('OK'); });
 
 const CORS_ORIGINS = String(
