@@ -301,6 +301,19 @@ const OTP_AUTH_LIMIT = rateLimit({
   },
 });
 
+const PASSKEY_AUTH_LIMIT = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: "PASSKEY_RATE_LIMITED",
+    code: "PASSKEY_RATE_LIMITED",
+    message: "Too many passkey requests. Please try again later.",
+    message_ar: "طلبات كثيرة جداً. يرجى المحاولة مرة أخرى لاحقاً.",
+  },
+});
+
 app.get("/api/health", (req, res) => {
   res.status(200).json({ status: "ok", uptime: process.uptime() });
 });
@@ -2815,8 +2828,10 @@ publicAuthRouter.post("/verify-otp", async (req, res) => {
   }
 });
 
-// Passkey login endpoints (public — no JWT required)
-publicAuthRouter.post("/passkey/login-options", async (req, res, next) => {
+// Passkey login endpoints (public — no JWT required, dedicated rate limiter)
+const passkeyPublicRouter = express.Router();
+
+passkeyPublicRouter.post("/passkey/login-options", async (req, res, next) => {
   try {
     const email = req.body?.email;
     const userId = req.body?.user_id;
@@ -2855,7 +2870,7 @@ publicAuthRouter.post("/passkey/login-options", async (req, res, next) => {
   }
 });
 
-publicAuthRouter.post("/passkey/login-verify", async (req, res, next) => {
+passkeyPublicRouter.post("/passkey/login-verify", async (req, res, next) => {
   try {
     const email = req.body?.email;
     const userId = req.body?.user_id;
@@ -2984,6 +2999,7 @@ apiRouter.use("/admin", adminRouter);
 
 // Mount public OTP auth routes at /api/auth (BEFORE authenticated /api router)
 app.use("/api/auth", OTP_AUTH_LIMIT, publicAuthRouter);
+app.use("/api/auth", PASSKEY_AUTH_LIMIT, passkeyPublicRouter);
 app.use("/api", GENERAL_API_LIMIT, apiRouter);
 
 // Legacy paths (backward compatibility) — same API auth stack
