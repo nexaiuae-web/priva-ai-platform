@@ -2851,37 +2851,37 @@ passkeyPublicRouter.post("/passkey/login-options", async (req, res, next) => {
   try {
     const email = req.body?.email;
     const userId = req.body?.user_id;
-    if (!email && !userId) {
-      return res.status(400).json({ error: "email or user_id is required." });
+
+    let allowCredentials = [];
+    let userKey;
+
+    if (email || userId) {
+      const User = require("./models/User");
+      const user = email
+        ? await User.findOne({ username: email.toLowerCase().trim() })
+        : await User.findOne({ id: userId });
+
+      if (user && Array.isArray(user.passkeys) && user.passkeys.length > 0) {
+        allowCredentials = user.passkeys.map((pk) => ({
+          id: pk.credentialID,
+          transports: pk.transports || [],
+        }));
+      }
+
+      userKey = email || userId;
+      console.log("[PASSKEY] login-options | user found:", user?.id, "| passkeys count:", (user?.passkeys || []).length);
+    } else {
+      userKey = "usernameless";
+      console.log("[PASSKEY] login-options | usernameless flow, allowCredentials: []");
     }
-
-    console.log("[PASSKEY] login-options | email:", email, "| userId:", userId);
-
-    const User = require("./models/User");
-    const user = email
-      ? await User.findOne({ username: email.toLowerCase().trim() })
-      : await User.findOne({ id: userId });
-
-    if (!user || !Array.isArray(user.passkeys) || user.passkeys.length === 0) {
-      console.log("[PASSKEY] login-options | no passkeys found for user");
-      return res.status(400).json({ error: "No passkeys registered for this user." });
-    }
-
-    console.log("[PASSKEY] login-options | user found:", user.id, "| passkeys count:", user.passkeys.length);
 
     const { rpId } = passkeyAuth.getWebAuthnConfig(req);
-    const allowCredentials = user.passkeys.map((pk) => ({
-      id: pk.credentialID,
-      transports: pk.transports || [],
-    }));
-
     const options = await passkeyAuth.generateAuthenticationOptions({
       rpID: rpId,
       allowCredentials,
       userVerification: "preferred",
     });
 
-    const userKey = email || userId;
     passkeyAuth.storeChallenge(userKey, options.challenge);
     console.log("[PASSKEY] login-options | challenge stored for userKey:", userKey, "| challenge:", options.challenge?.slice(0, 20) + "...");
 
@@ -2896,42 +2896,35 @@ passkeyPublicRouter.post("/passkey/login-verify", async (req, res, next) => {
   try {
     const email = req.body?.email;
     const userId = req.body?.user_id;
-    const credential = req.body?.credential;
+    const rawCredential = req.body?.credential || req.body;
 
     console.log("[PASSKEY] login-verify | email:", email, "| userId:", userId);
-    console.log("[PASSKEY] login-verify | credential id:", credential?.id?.slice(0, 20) + "...");
+    console.log("[PASSKEY] login-verify | credential id:", rawCredential?.id?.slice(0, 40) + "...");
 
-    if (!credential || !credential.id || !credential.response) {
+    if (!rawCredential || !rawCredential.id || !rawCredential.response) {
       return res.status(400).json({ error: "Invalid credential response." });
     }
 
-    const userKey = email || userId;
-    if (!userKey) {
-      return res.status(400).json({ error: "email or user_id is required." });
-    }
+    const credentialId = rawCredential.id;
 
     const User = require("./models/User");
-    const user = email
-      ? await User.findOne({ username: email.toLowerCase().trim() })
-      : await User.findOne({ id: userId });
-
+    const user = await User.findOne({ "passkeys.credentialID": credentialId });
     if (!user) {
-      console.log("[PASSKEY] login-verify | user not found");
-      return res.status(400).json({ error: "User not found." });
+      console.log("[PASSKEY] login-verify | no user found for credential id");
+      return res.status(400).json({ error: "Credential not registered." });
     }
 
-    console.log("[PASSKEY] login-verify | user found:", user.id, "| total passkeys:", (user.passkeys || []).length);
-
-    const passkey = (user.passkeys || []).find((pk) => pk.credentialID === credential.id);
+    const passkey = (user.passkeys || []).find((pk) => pk.credentialID === credentialId);
     if (!passkey) {
-      console.log("[PASSKEY] login-verify | credential id not found in user passkeys");
-      return res.status(400).json({ error: "Credential not registered for this user." });
+      console.log("[PASSKEY] login-verify | credential id not found in user passkeys (unexpected)");
+      return res.status(400).json({ error: "Credential not registered." });
     }
 
-    console.log("[PASSKEY] login-verify | matching passkey found, counter before:", passkey.counter);
+    console.log("[PASSKEY] login-verify | user found:", user.id, "| username:", user.username, "| passkey counter before:", passkey.counter);
 
+    const userKey = email || userId || "usernameless";
     const challenge = passkeyAuth.getAndClearChallenge(userKey);
-    console.log("[PASSKEY] login-verify | retrieved challenge:", challenge ? challenge.slice(0, 20) + "..." : "null (expired or not found)");
+    console.log("[PASSKEY] login-verify | retrieved challenge for key:", userKey, "| challenge:", challenge ? challenge.slice(0, 20) + "..." : "null (expired or not found)");
     if (!challenge) {
       return res.status(400).json({ error: "Authentication challenge not found or expired." });
     }
@@ -2940,7 +2933,7 @@ passkeyPublicRouter.post("/passkey/login-verify", async (req, res, next) => {
     let verification;
     try {
       verification = await passkeyAuth.verifyAuthenticationResponse({
-        response: credential,
+        response: rawCredential,
         expectedChallenge: challenge,
         expectedOrigin: origin,
         expectedRPID: rpId,
