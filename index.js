@@ -2660,6 +2660,8 @@ authRouter.post("/passkey/register-options", async (req, res, next) => {
     const userId = req.auth?.user?.id;
     if (!userId) return res.status(401).json({ error: "Authentication required." });
 
+    console.log("[PASSKEY] register-options | userId:", userId, "| username:", req.auth?.user?.username);
+
     const { rpName, rpId } = passkeyAuth.getWebAuthnConfig(req);
     const options = await passkeyAuth.generateRegistrationOptions({
       rpName,
@@ -2671,6 +2673,7 @@ authRouter.post("/passkey/register-options", async (req, res, next) => {
     });
 
     passkeyAuth.storeChallenge(userId, options.challenge);
+    console.log("[PASSKEY] register-options | challenge stored for userId:", userId, "| challenge:", options.challenge?.slice(0, 20) + "...");
 
     return res.status(200).json(options);
   } catch (error) {
@@ -2684,12 +2687,16 @@ authRouter.post("/passkey/register-verify", async (req, res, next) => {
     const userId = req.auth?.user?.id;
     if (!userId) return res.status(401).json({ error: "Authentication required." });
 
+    console.log("[PASSKEY] register-verify | userId:", userId);
+    console.log("[PASSKEY] register-verify | req.body keys:", Object.keys(req.body || {}));
+
     const credential = req.body;
     if (!credential || !credential.id || !credential.response) {
       return res.status(400).json({ error: "Invalid credential response." });
     }
 
     const challenge = passkeyAuth.getAndClearChallenge(userId);
+    console.log("[PASSKEY] register-verify | retrieved challenge:", challenge ? challenge.slice(0, 20) + "..." : "null (expired or not found)");
     if (!challenge) {
       return res.status(400).json({ error: "Registration challenge not found or expired." });
     }
@@ -2704,8 +2711,8 @@ authRouter.post("/passkey/register-verify", async (req, res, next) => {
         expectedRPID: rpId,
       });
     } catch (error) {
-      console.error("Passkey Register Error:", error);
-      return res.status(400).json({ verified: false, error: error.message });
+      console.error("[PASSKEY REGISTER ERROR DETAILED]:", error);
+      return res.status(400).json({ verified: false, error: error.message, details: String(error.stack || error) });
     }
 
     if (!verification.verified || !verification.registrationInfo) {
@@ -2722,6 +2729,7 @@ authRouter.post("/passkey/register-verify", async (req, res, next) => {
 
     const User = require("./models/User");
     await User.updateOne({ id: userId }, { $push: { passkeys: newPasskey } });
+    console.log("[PASSKEY] register-verify | passkey saved for userId:", userId, "| credentialID:", webauthnCred.id);
 
     return res.status(200).json({ success: true, credentialID: webauthnCred.id });
   } catch (error) {
@@ -2845,14 +2853,19 @@ passkeyPublicRouter.post("/passkey/login-options", async (req, res, next) => {
       return res.status(400).json({ error: "email or user_id is required." });
     }
 
+    console.log("[PASSKEY] login-options | email:", email, "| userId:", userId);
+
     const User = require("./models/User");
     const user = email
       ? await User.findOne({ username: email.toLowerCase().trim() })
       : await User.findOne({ id: userId });
 
     if (!user || !Array.isArray(user.passkeys) || user.passkeys.length === 0) {
+      console.log("[PASSKEY] login-options | no passkeys found for user");
       return res.status(400).json({ error: "No passkeys registered for this user." });
     }
+
+    console.log("[PASSKEY] login-options | user found:", user.id, "| passkeys count:", user.passkeys.length);
 
     const { rpId } = passkeyAuth.getWebAuthnConfig(req);
     const allowCredentials = user.passkeys.map((pk) => ({
@@ -2868,6 +2881,7 @@ passkeyPublicRouter.post("/passkey/login-options", async (req, res, next) => {
 
     const userKey = email || userId;
     passkeyAuth.storeChallenge(userKey, options.challenge);
+    console.log("[PASSKEY] login-options | challenge stored for userKey:", userKey, "| challenge:", options.challenge?.slice(0, 20) + "...");
 
     return res.status(200).json(options);
   } catch (error) {
@@ -2881,6 +2895,9 @@ passkeyPublicRouter.post("/passkey/login-verify", async (req, res, next) => {
     const email = req.body?.email;
     const userId = req.body?.user_id;
     const credential = req.body?.credential;
+
+    console.log("[PASSKEY] login-verify | email:", email, "| userId:", userId);
+    console.log("[PASSKEY] login-verify | credential id:", credential?.id?.slice(0, 20) + "...");
 
     if (!credential || !credential.id || !credential.response) {
       return res.status(400).json({ error: "Invalid credential response." });
@@ -2897,36 +2914,52 @@ passkeyPublicRouter.post("/passkey/login-verify", async (req, res, next) => {
       : await User.findOne({ id: userId });
 
     if (!user) {
+      console.log("[PASSKEY] login-verify | user not found");
       return res.status(400).json({ error: "User not found." });
     }
 
+    console.log("[PASSKEY] login-verify | user found:", user.id, "| total passkeys:", (user.passkeys || []).length);
+
     const passkey = (user.passkeys || []).find((pk) => pk.credentialID === credential.id);
     if (!passkey) {
+      console.log("[PASSKEY] login-verify | credential id not found in user passkeys");
       return res.status(400).json({ error: "Credential not registered for this user." });
     }
 
+    console.log("[PASSKEY] login-verify | matching passkey found, counter before:", passkey.counter);
+
     const challenge = passkeyAuth.getAndClearChallenge(userKey);
+    console.log("[PASSKEY] login-verify | retrieved challenge:", challenge ? challenge.slice(0, 20) + "..." : "null (expired or not found)");
     if (!challenge) {
       return res.status(400).json({ error: "Authentication challenge not found or expired." });
     }
 
     const { origin, rpId } = passkeyAuth.getWebAuthnConfig(req);
-    const verification = await passkeyAuth.verifyAuthenticationResponse({
-      response: credential,
-      expectedChallenge: challenge,
-      expectedOrigin: origin,
-      expectedRPID: rpId,
-      credential: {
-        id: passkey.credentialID,
-        publicKey: Buffer.from(passkey.publicKey, "base64url"),
-        counter: passkey.counter,
-        transports: passkey.transports,
-      },
-    });
+    let verification;
+    try {
+      verification = await passkeyAuth.verifyAuthenticationResponse({
+        response: credential,
+        expectedChallenge: challenge,
+        expectedOrigin: origin,
+        expectedRPID: rpId,
+        credential: {
+          id: passkey.credentialID,
+          publicKey: Buffer.from(passkey.publicKey, "base64url"),
+          counter: passkey.counter,
+          transports: passkey.transports,
+        },
+      });
+    } catch (error) {
+      console.error("[PASSKEY LOGIN ERROR DETAILED]:", error);
+      return res.status(401).json({ verified: false, error: error.message, details: String(error.stack || error) });
+    }
 
     if (!verification.verified) {
+      console.log("[PASSKEY] login-verify | verification.verified is false");
       return res.status(401).json({ error: "Authentication verification failed." });
     }
+
+    console.log("[PASSKEY] login-verify | verification passed, newCounter:", verification.authenticationInfo.newCounter);
 
     await User.updateOne(
       { id: user.id, "passkeys.credentialID": passkey.credentialID },

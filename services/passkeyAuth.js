@@ -39,6 +39,10 @@ function getWebAuthnConfig(req) {
   }
 
   const origin = process.env.FRONTEND_URL || origins;
+
+  console.log("[PASSKEY DEBUG] Request Headers Origin:", req.headers.origin, "Referer:", req.headers.referer);
+  console.log("[PASSKEY DEBUG] Computed Config:", { rpId, origin });
+
   return { rpName, rpId, origin };
 }
 
