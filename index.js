@@ -2695,12 +2695,18 @@ authRouter.post("/passkey/register-verify", async (req, res, next) => {
     }
 
     const { origin, rpId } = passkeyAuth.getWebAuthnConfig(req);
-    const verification = await passkeyAuth.verifyRegistrationResponse({
-      response: credential,
-      expectedChallenge: challenge,
-      expectedOrigin: origin,
-      expectedRPID: rpId,
-    });
+    let verification;
+    try {
+      verification = await passkeyAuth.verifyRegistrationResponse({
+        response: credential,
+        expectedChallenge: challenge,
+        expectedOrigin: origin,
+        expectedRPID: rpId,
+      });
+    } catch (error) {
+      console.error("Passkey Register Error:", error);
+      return res.status(400).json({ verified: false, error: error.message });
+    }
 
     if (!verification.verified || !verification.registrationInfo) {
       return res.status(400).json({ error: "Registration verification failed." });

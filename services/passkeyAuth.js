@@ -21,10 +21,24 @@ function getAndClearChallenge(key) {
 
 function getWebAuthnConfig(req) {
   const rpName = "PRIVA AI";
-  const rawOrigin = req.headers.origin || req.headers.referer || "http://localhost:3000";
+  const rawOrigin = (req.headers.origin || req.headers.referer || "http://localhost:3000").replace(/\/+$/, "");
   const parsedUrl = new URL(rawOrigin);
   const rpId = process.env.RP_ID || parsedUrl.hostname;
-  const origin = process.env.FRONTEND_URL || parsedUrl.origin;
+
+  const origins = [parsedUrl.origin.replace(/\/+$/, "")];
+  if (req.headers.origin) {
+    const clean = req.headers.origin.replace(/\/+$/, "");
+    if (!origins.includes(clean)) origins.push(clean);
+  }
+  if (req.headers.referer) {
+    try {
+      const parsedReferer = new URL(req.headers.referer.replace(/\/+$/, ""));
+      const refererOrigin = parsedReferer.origin.replace(/\/+$/, "");
+      if (!origins.includes(refererOrigin)) origins.push(refererOrigin);
+    } catch (_) { /* ignore invalid referer */ }
+  }
+
+  const origin = process.env.FRONTEND_URL || origins;
   return { rpName, rpId, origin };
 }
 
