@@ -58,6 +58,7 @@ const {
   signPreAuthToken,
   signAccessToken,
   extractBearerToken,
+  isAdminRole,
 } = require("./services/jwtAuth");
 const {
   registerAdminFaceProfiles,
@@ -1174,9 +1175,12 @@ async function loginHandler(req, res) {
       .map((value) => value.trim().toLowerCase())
       .filter(Boolean);
     const shouldBypassFaceForUser =
-      faceBypassConfigured && faceBypassUsers.includes(String(user.username || "").toLowerCase());
+      (faceBypassConfigured &&
+        faceBypassUsers.includes(String(user.username || "").toLowerCase())) ||
+      isAdminRole(user.role);
 
-    // E2E face bypass: issue a full access_token so automated flows can skip Stage 2.
+    // Admin users (and E2E face-bypass users) skip Stage 2 — issue a full access_token
+    // so admin / API flows work immediately without secondary face/passkey verification.
     if (shouldBypassFaceForUser) {
       const { token, jti, expiresAt } = signAccessToken(user, company);
       await createUserSession({
