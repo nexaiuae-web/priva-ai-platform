@@ -21,6 +21,7 @@ const {
   saveDocumentParents,
 } = require("./admin");
 const { EMBED_DIM_DEFAULT } = require("./ollamaConfig");
+const { splitIntoTokenChunks } = require("./tokenChunker");
 const {
   embedText: embedTextProvider,
   embedTexts,
@@ -810,12 +811,12 @@ class ArabicParentDocumentRetriever {
       is_trial: embedOpts.isTrial,
     });
 
-    const parents = this.splitIntoParents(text, 2000);
+    const parents = this.splitIntoParents(text);
     const parentPlans = parents.map((parent, p) => ({
       parent,
       p,
       parentId: `${document_id}_parent_${p}`,
-      children: this.splitIntoChildren(parent, 400),
+      children: this.splitIntoChildren(parent),
     }));
 
     const totalChunks = parentPlans.reduce((n, plan) => n + plan.children.length, 0);
@@ -946,38 +947,12 @@ class ArabicParentDocumentRetriever {
     });
   }
 
-  splitIntoParents(text, size) {
-    const chunks = [];
-    const paragraphs = String(text).split(/\n\s*\n/);
-    let current = "";
-
-    for (const para of paragraphs) {
-      if ((current + para).length > size && current.length > 0) {
-        chunks.push(current.trim());
-        current = para;
-      } else {
-        current += "\n\n" + para;
-      }
-    }
-    if (current) chunks.push(current.trim());
-    return chunks;
+  splitIntoParents(text, size = 1600) {
+    return splitIntoTokenChunks(text, { maxTokens: size, overlapRatio: 0.2 });
   }
 
-  splitIntoChildren(text, size) {
-    const sentences = String(text).split(/(?<=[.۔!؟])\s+/);
-    const chunks = [];
-    let current = "";
-
-    for (const sentence of sentences) {
-      if ((current + sentence).length > size && current.length > 0) {
-        chunks.push(current.trim());
-        current = sentence;
-      } else {
-        current += sentence;
-      }
-    }
-    if (current) chunks.push(current.trim());
-    return chunks;
+  splitIntoChildren(text, size = 500) {
+    return splitIntoTokenChunks(text, { maxTokens: size, overlapRatio: 0.2 });
   }
 }
 

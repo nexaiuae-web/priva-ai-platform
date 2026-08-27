@@ -1,4 +1,10 @@
 const LEGAL_MARKER_REGEX = /(?=\b(?:المادة|البند|الطرف)\b)/g;
+const { splitIntoTokenChunks, countTokens } = require("./tokenChunker");
+
+/** Default token budget per chunk for the GPT-4o-mini RAG pipeline. */
+const DEFAULT_MAX_TOKENS = 800;
+/** Overlap ratio between adjacent chunks so context is never lost. */
+const DEFAULT_OVERLAP_RATIO = 0.2;
 
 function detectDocumentType(filename, mimeType, sampleText) {
   const name = String(filename || "").toLowerCase();
@@ -58,7 +64,11 @@ function detectContentType(text) {
   return "legal_clause";
 }
 
-function groupIntoBodyChunks(text, maxChars = 800, overlapChars = 100) {
+function groupIntoBodyChunks(
+  text,
+  maxTokens = DEFAULT_MAX_TOKENS,
+  overlapRatio = DEFAULT_OVERLAP_RATIO
+) {
   const paragraphs = splitByLegalMarkers(text);
   const bodyChunks = [];
 
@@ -66,49 +76,59 @@ function groupIntoBodyChunks(text, maxChars = 800, overlapChars = 100) {
     return bodyChunks;
   }
 
+  // Token budget reserved to keep a single paragraph below the chunk cap.
   let current = "";
+  const currentTokenCount = () => countTokens(current);
+
+  const addToCurrent = (candidate) => {
+    if (currentTokenCount() + countTokens(candidate) <= maxTokens) {
+      current = current ? `${current}\n\n${candidate}` : candidate;
+      return true;
+    }
+    return false;
+  };
+
+  const flush = () => {
+    if (current) {
+      bodyChunks.push(current.trim());
+      current = "";
+    }
+  };
+
   for (const paragraph of paragraphs) {
-    const candidate = current ? `${current}\n\n${paragraph}` : paragraph;
-    if (candidate.length <= maxChars) {
-      current = candidate;
+    if (addToCurrent(paragraph)) {
       continue;
     }
 
-    if (current) {
-      bodyChunks.push(current);
-    }
+    // Paragraph does not fit within the remaining budget: flush what we have.
+    flush();
 
-    if (paragraph.length <= maxChars) {
+    if (countTokens(paragraph) <= maxTokens) {
       current = paragraph;
       continue;
     }
 
-    let start = 0;
-    while (start < paragraph.length) {
-      const end = Math.min(start + maxChars, paragraph.length);
-      bodyChunks.push(paragraph.slice(start, end));
-      if (end >= paragraph.length) {
-        break;
-      }
-      start = Math.max(0, end - overlapChars);
-    }
-    current = "";
+    // A single oversized paragraph is split on tokens with 20% overlap.
+    bodyChunks.push(...splitIntoTokenChunks(paragraph, { maxTokens, overlapRatio }));
   }
 
-  if (current) {
-    bodyChunks.push(current);
-  }
+  flush();
 
   return bodyChunks;
 }
 
-function semanticChunk(text, maxChars = 800, overlapChars = 100, context = {}) {
+function semanticChunk(
+  text,
+  maxTokens = DEFAULT_MAX_TOKENS,
+  overlapRatio = DEFAULT_OVERLAP_RATIO,
+  context = {}
+) {
   const { filename, mime_type: mimeType, document_type: explicitType } = context;
   const documentType =
     explicitType || detectDocumentType(filename, mimeType, text);
   const prefix = buildGlobalPrefix(filename, documentType);
 
-  const bodyChunks = groupIntoBodyChunks(text, maxChars, overlapChars);
+  const bodyChunks = groupIntoBodyChunks(text, maxTokens, overlapRatio);
 
   return bodyChunks.map((chunkText, index) => {
     const inner = chunkText;

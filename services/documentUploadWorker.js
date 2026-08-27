@@ -16,6 +16,7 @@ const { extractTextFromImage } = require("./ocr");
 const { extractTextFromPdf } = require("./pdfExtractor");
 const { isImageUpload, isPdfUpload } = require("./fileType");
 const { OCRCleaner } = require("./ocrCleaner");
+const { structureDocument } = require("./markdownFormatter");
 const { semanticChunk, detectDocumentType, groupIntoBodyChunks } = require("./chunker");
 
 const ocrCleaner = new OCRCleaner();
@@ -199,16 +200,22 @@ async function processDocumentUploadJob(jobId) {
     );
   }
 
+  // Re-format the cleaned text into structured Markdown (headings, lists and
+  // parsed tables) so the RAG index and GPT-4o-mini downstream see clean,
+  // well-organised excerpts instead of raw OCR line noise.
+  const markdownText = structureDocument(cleanedText);
+  const indexText = markdownText && String(markdownText).trim().length > 0 ? markdownText : cleanedText;
+
   await pushJobProgress(jobId, "chunking", { message: "Chunking document…" });
 
-  const detectedType = detectDocumentType(file.originalname, file.mimetype, cleanedText);
-  const rawBodies = groupIntoBodyChunks(rawText, 800, 100);
+  const detectedType = detectDocumentType(file.originalname, file.mimetype, indexText);
+  const rawBodies = groupIntoBodyChunks(rawText, 800, 0.2);
   const ocrVerification = {
     first_chunk_before_cleaning: rawBodies[0] || "",
     first_chunk_after_cleaning: ocrCleaner.clean(rawBodies[0] || ""),
   };
 
-  const chunks = semanticChunk(cleanedText, 800, 100, {
+  const chunks = semanticChunk(indexText, 800, 0.2, {
     filename: file.originalname,
     mime_type: file.mimetype,
     document_type: detectedType,
@@ -241,6 +248,7 @@ async function processDocumentUploadJob(jobId) {
       chunks,
       raw_ocr_text: rawText,
       cleaned_text: cleanedText,
+      markdown_text: indexText,
       raw_text_length: rawText.length,
       cleaned_text_length: cleanedText.length,
       detected_document_type: detectedType,
@@ -266,7 +274,7 @@ async function processDocumentUploadJob(jobId) {
     ragStats = await retrieverInstance.indexDocument({
       company,
       document_id: document.id,
-      text: cleanedText,
+      text: indexText,
       uploaded_by_user_id: job.user_id || null,
       folder_id: job.folder_id || null,
       onProgress: (p) => {

@@ -7,8 +7,18 @@ const CRITICAL_LANGUAGE_RULE = `CRITICAL LANGUAGE RULE: You MUST always draft th
 const RAG_OCR_FLEXIBILITY_INSTRUCTION = `CRITICAL MULTILINGUAL OCR FLEXIBILITY RULE:
 1. The provided context excerpts are extracted via OCR and speech-to-text tools, which means they may contain typographical errors, spelling mistakes, character omissions, or noisy artifacts in ANY language (e.g., Arabic, English, Spanish, French, etc.).
 2. You must apply strict semantic matching rather than exact keyword or string matching. If a word or entity is slightly misspelled, deformed, or contains OCR noise but the semantic meaning and context point clearly to the entity (e.g., 'البحلوله' for 'البطولة', 'coorporation' for 'corporation', 'enviroment' for 'environment'), you MUST evaluate it as a valid match.
-3. Under no circumstances should you reject a context or output an "Information not available" refusal solely due to spelling variations, translation artifacts, or noisy OCR text, provided that related core entities, places, names, or meanings are present in the chunks.
-4. Synthesize your answer intelligently based on the closest logical meaning of the retrieved text.`;
+3. The excerpts may be poorly structured: lines may be out of order, tables may be flattened, headers may be missing, and content may be unstructured or jumbled. Reconstruct the intended meaning from surrounding text rather than refusing because the layout is imperfect.
+4. Under no circumstances should you reject a context or output an "Information not available" refusal solely due to spelling variations, translation artifacts, or noisy OCR text, provided that related core entities, places, names, or meanings are present in the chunks.
+5. Synthesize your answer intelligently based on the closest logical meaning of the retrieved text.`;
+
+const RAG_CHAIN_OF_THOUGHT_INSTRUCTION = `STEP-BY-STEP EXTRACTION (CHAIN-OF-THOUGHT):
+Before writing the final answer, work through the retrieval excerpt(s) methodically and silently:
+1. Identify every entity, number, date, clause, or named object the user is asking about anywhere in the excerpts (including partially readable or misspelled occurrences).
+2. Resolve OCR noise and spelling mistakes to the closest intended term using context.
+3. Check whether the resolved pieces actually answer the question; assemble them into a coherent, factual response.
+4. Only produce the final answer after this extraction is complete — never jump to "information not found" during step 1 or 2.
+You do NOT need to narrate your reasoning; reasoning is an internal discipline. If related evidence exists in any excerpt — even if imperfectly spelled or in an unstructured layout — the final answer MUST be given, not refused.`;
+
 
 const PRIVA_CORE_INSTRUCTION = `You are PRIVA AI, a secure corporate assistant. Your task is to summarize documents or draft formal letters/emails based STRICTLY and ONLY on the provided document contexts.
 - NEVER assume, hallucinate, or extrapolate facts outside the retrieved context.
@@ -158,6 +168,7 @@ Use every relevant excerpt; do not ignore a file because the user's question use
   const systemInstruction = [
     coreInstruction,
     RAG_OCR_FLEXIBILITY_INSTRUCTION,
+    RAG_CHAIN_OF_THOUGHT_INSTRUCTION,
     modeBlocks,
     contextIntro,
     `USER QUERY LANGUAGE: ${queryLanguage}`,
@@ -253,6 +264,7 @@ module.exports = {
   PRIVA_GLOBAL_SUMMARY_CORE,
   GLOBAL_SUMMARY_INSTRUCTION,
   RAG_OCR_FLEXIBILITY_INSTRUCTION,
+  RAG_CHAIN_OF_THOUGHT_INSTRUCTION,
   FOLDER_STRICT_INSTRUCTION,
   FOLDER_GLOBAL_FALLBACK_INSTRUCTION,
   CRITICAL_LANGUAGE_RULE,
