@@ -22,6 +22,18 @@ const {
 const OLLAMA_URL = (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
 const OLLAMA_MODEL = getChatModel();
 
+/**
+ * Default system prompt injected at the start of every LLM request when the
+ * caller does not supply one. Overridable via SYSTEM_PROMPT in .env.
+ */
+const DEFAULT_SYSTEM_PROMPT = String(
+  process.env.SYSTEM_PROMPT ||
+    "أنت مساعد ذكي متخصص في قراءة وتحليل المستندات والملفات، تلخيصها، وإجابة أسئلة المستخدم بدقة بناءً على المحتوى المرفق والتعليمات."
+).trim();
+
+/** Marker used to delimit attached file content injected into the user message. */
+const ATTACHED_FILE_CONTENT_HEADER = "--- ATTACHED FILE CONTENT ---";
+
 /** Undici default connect timeout is 10s — too low for large Arabic OCR payloads. */
 const OPENAI_CONNECT_TIMEOUT_MS = parseInt(
   process.env.OPENAI_CONNECT_TIMEOUT_MS || "30000",
@@ -104,6 +116,55 @@ function isInvalidExternalKey(apiKey) {
 }
 
 /**
+ * Prepend the default system prompt as the first message if the incoming
+ * message array does not already contain a `system` role message. Returns a
+ * NEW array; the caller's array is left untouched.
+ * @param {Array<{role:string,content:string}>} messages
+ * @returns {Array<{role:string,content:string}>}
+ */
+function ensureSystemPrompt(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  const hasSystem = list.some(
+    (m) => String(m?.role || "").trim().toLowerCase() === "system"
+  );
+  if (hasSystem) {
+    return list;
+  }
+  return [{ role: "system", content: DEFAULT_SYSTEM_PROMPT }, ...list];
+}
+
+/**
+ * Format raw attached-file text (PDF/TXT/DOCX extraction, OCR, etc.) into a
+ * clearly delimited block that can be merged into a user message.
+ * @param {Array<{filename?:string, contentType?:string, text?:string}>|Array<string>|string} fileContext
+ * @returns {string}
+ */
+function formatFileContext(fileContext) {
+  if (fileContext == null) return "";
+
+  const entries = Array.isArray(fileContext)
+    ? fileContext
+    : [{ text: fileContext }];
+
+  const blocks = entries
+    .filter(Boolean)
+    .map((entry) => {
+      const e = typeof entry === "string" ? { text: entry } : entry || {};
+      const fname = String(e.filename || "").trim();
+      const text = String(e.text ?? "").trim();
+      if (!text) return "";
+      const header = fname
+        ? `${ATTACHED_FILE_CONTENT_HEADER} [${fname}]`
+        : ATTACHED_FILE_CONTENT_HEADER;
+      return `${header}\n${text}`;
+    })
+    .filter(Boolean);
+
+  if (!blocks.length) return "";
+  return blocks.join("\n\n");
+}
+
+/**
  * Streaming chat — OpenAI when CHAT_PROVIDER=openai, else Ollama.
  * @param {{ messages: Array<{role:string,content:string}>, apiKey?: string|null, signal?: AbortSignal }} opts
  * @param {(delta: string) => void} onDelta
@@ -138,8 +199,29 @@ function isRetryableLlmError(error) {
   );
 }
 
-async function streamChatCompletion({ messages, apiKey = null, signal }, onDelta) {
+async function streamChatCompletion({ messages, apiKey = null, signal, fileContext = null }, onDelta) {
   const provider = getChatProvider();
+
+  let workingMessages = ensureSystemPrompt(messages);
+
+  // Attached document text (PDF/TXT/DOCX extraction, OCR) — merged into the
+  // user turn under `--- ATTACHED FILE CONTENT ---` so the main provider and
+  // the Groq failover both receive it.
+  if (fileContext != null) {
+    const attached = formatFileContext(fileContext);
+    if (attached) {
+      const userIdx = workingMessages.findLastIndex(
+        (m) => String(m?.role || "").trim().toLowerCase() === "user"
+      );
+      const idx = userIdx >= 0 ? userIdx : workingMessages.length - 1;
+      const target = workingMessages[idx] ?? {};
+      workingMessages = [...workingMessages];
+      workingMessages[idx] = {
+        role: "user",
+        content: `${attached}\n\n${String(target.content ?? "")}`,
+      };
+    }
+  }
 
   if (provider === "openai") {
     const resolvedKey = resolveOpenAIApiKey(apiKey);
@@ -151,7 +233,7 @@ async function streamChatCompletion({ messages, apiKey = null, signal }, onDelta
     console.log("[LLM] ☁️ OpenAI chat stream | model:", getOpenAIChatModel());
 
     try {
-      return await streamOpenAI({ messages, signal, apiKey: resolvedKey }, onDelta);
+      return await streamOpenAI({ messages: workingMessages, signal, apiKey: resolvedKey }, onDelta);
     } catch (openAiErr) {
       const retryable = isRetryableLlmError(openAiErr);
 
@@ -177,12 +259,12 @@ async function streamChatCompletion({ messages, apiKey = null, signal }, onDelta
         openAiErr?.cause?.status || openAiErr?.message
       );
       const { streamGroqChatCompletion } = require("./groqClient");
-      return streamGroqChatCompletion({ messages }, onDelta);
+      return streamGroqChatCompletion({ messages: workingMessages }, onDelta);
     }
   }
 
   console.log("[LLM] 🏠 Local Ollama chat | model:", OLLAMA_MODEL);
-  return streamOllama({ messages, signal }, onDelta);
+  return streamOllama({ messages: workingMessages, signal }, onDelta);
 }
 
 async function streamOpenAI({ messages, signal, apiKey }, onDelta) {
@@ -384,10 +466,11 @@ async function streamOllama({ messages, signal }, onDelta) {
  * Non-streaming chat (legacy).
  */
 async function chatComplete({ messages, apiKey = null }) {
+  const prepared = ensureSystemPrompt(messages);
   if (isOpenAIChatEnabled()) {
     const apiKeyEnv = getOpenAIChatApiKey();
     const model = getOpenAIChatModel();
-    const preparedMessages = prepareOpenAiMessages(messages);
+    const preparedMessages = prepareOpenAiMessages(prepared);
     const dispatcher = getOpenAiFetchDispatcher();
     const fetchOptions = {
       method: "POST",
@@ -426,7 +509,7 @@ async function chatComplete({ messages, apiKey = null }) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: OLLAMA_MODEL,
-      messages,
+      messages: prepared,
       stream: false,
       keep_alive: -1,
       options: { temperature: 0.1, num_ctx: 2048, num_predict: 512 },
@@ -454,6 +537,10 @@ module.exports = {
   streamOllama,
   OLLAMA_URL,
   OLLAMA_MODEL,
+  DEFAULT_SYSTEM_PROMPT,
+  ATTACHED_FILE_CONTENT_HEADER,
+  ensureSystemPrompt,
+  formatFileContext,
   getChatProvider,
   isOpenAIChatEnabled,
 };
