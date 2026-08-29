@@ -11,6 +11,7 @@ const {
   getOpenAIChatModel,
   getOpenAIChatApiKey,
   isOpenAIChatEnabled,
+  isGroqConfigured,
 } = require("./chatConfig");
 const {
   fitMessagesToTokenBudget,
@@ -115,6 +116,28 @@ function resolveOpenAIApiKey(apiKey) {
   return getOpenAIChatApiKey();
 }
 
+/**
+ * Decide whether an OpenAI failure is transient and safe to retry on Groq.
+ * Only network timeouts, rate limits (429) and server errors (5xx) trigger
+ * failover — auth (401/400) and malformed-request errors do NOT.
+ */
+function isRetryableLlmError(error) {
+  const cause = error?.cause || error;
+  const status =
+    Number.isFinite(Number(cause?.status)) ? Number(cause.status) : null;
+
+  if (status != null) {
+    return status === 429 || (status >= 500 && status <= 599);
+  }
+
+  const message = String(cause?.message || error?.message || "").toLowerCase();
+  return (
+    /timeout|timed out|aborted|abort|fetch failed|network|rate.?limit|429|5\d\d|service overloaded|econnreset|socket hang/i.test(
+      message
+    )
+  );
+}
+
 async function streamChatCompletion({ messages, apiKey = null, signal }, onDelta) {
   const provider = getChatProvider();
 
@@ -126,7 +149,36 @@ async function streamChatCompletion({ messages, apiKey = null, signal }, onDelta
       );
     }
     console.log("[LLM] ☁️ OpenAI chat stream | model:", getOpenAIChatModel());
-    return streamOpenAI({ messages, signal, apiKey: resolvedKey }, onDelta);
+
+    try {
+      return await streamOpenAI({ messages, signal, apiKey: resolvedKey }, onDelta);
+    } catch (openAiErr) {
+      const retryable = isRetryableLlmError(openAiErr);
+
+      if (!retryable) {
+        console.warn(
+          "[LLM] OpenAI failure is NOT retryable (no Groq failover):",
+          openAiErr?.message,
+          openAiErr?.cause?.status || ""
+        );
+        throw openAiErr;
+      }
+
+      if (!isGroqConfigured()) {
+        console.warn(
+          "[LLM] OpenAI retryable failure detected but GROQ_API_KEY is not configured — aborting without failover:",
+          openAiErr?.message
+        );
+        throw openAiErr;
+      }
+
+      console.warn(
+        "[LLM] 🟠 OpenAI retryable failure — failing over to Groq:",
+        openAiErr?.cause?.status || openAiErr?.message
+      );
+      const { streamGroqChatCompletion } = require("./groqClient");
+      return streamGroqChatCompletion({ messages }, onDelta);
+    }
   }
 
   console.log("[LLM] 🏠 Local Ollama chat | model:", OLLAMA_MODEL);
@@ -181,9 +233,11 @@ async function streamOpenAI({ messages, signal, apiKey }, onDelta) {
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => "");
-      throw new Error(
+      const err = new Error(
         `OpenAI stream HTTP ${response.status}: ${errorText.slice(0, 500)}`
       );
+      err.status = response.status;
+      throw err;
     }
 
     if (!response.body) {

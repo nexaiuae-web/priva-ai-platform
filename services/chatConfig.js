@@ -21,9 +21,24 @@ function isOpenAIChatEnabled() {
   return getChatProvider() === "openai" && getOpenAIChatApiKey().length > 0;
 }
 
+function getGroqApiKey() {
+  return String(process.env.GROQ_API_KEY || "").trim();
+}
+
+function getGroqChatModel() {
+  return (process.env.GROQ_CHAT_MODEL || "llama-3.3-70b-versatile").trim();
+}
+
+function isGroqConfigured() {
+  return getGroqApiKey().length > 0;
+}
+
 module.exports = {
   getChatProvider,
   getOpenAIChatModel,
   getOpenAIChatApiKey,
   isOpenAIChatEnabled,
+  getGroqApiKey,
+  getGroqChatModel,
+  isGroqConfigured,
 };

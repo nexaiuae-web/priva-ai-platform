@@ -28,6 +28,12 @@ services:
         value: "1"
       - key: CI
         value: "true"
+      # Groq Llama-3.3-70B automatic failover for OpenAI chat. Set the value in
+      # the Render dashboard (sync: false = dashboard-managed secret, never committed).
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_CHAT_MODEL
+        value: llama-3.3-70b-versatile
       # Set in Render dashboard (never commit secrets):
       # MONGODB_URI, JWT_SECRET, OPENAI_API_KEY, CORS_ORIGIN,
       # PRIVA_CLOUDINARY_CLOUD_NAME, PRIVA_CLOUDINARY_API_KEY, PRIVA_CLOUDINARY_API_SECRET, etc.
