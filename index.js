@@ -55,7 +55,6 @@ const {
   requireAuth,
   requireAdmin,
   requireFaceVerified,
-  signPreAuthToken,
   signAccessToken,
   extractBearerToken,
   isAdminRole,
@@ -1167,48 +1166,11 @@ async function loginHandler(req, res) {
 
     const { user, company } = authResult;
 
-    const faceBypassConfigured = /^true$/i.test(
-      String(process.env.E2E_FACE_BYPASS_ENABLED || "false").trim()
-    );
-    const faceBypassUsers = String(process.env.E2E_FACE_BYPASS_USERS || "adam")
-      .split(",")
-      .map((value) => value.trim().toLowerCase())
-      .filter(Boolean);
-    const shouldBypassFaceForUser =
-      (faceBypassConfigured &&
-        faceBypassUsers.includes(String(user.username || "").toLowerCase())) ||
-      isAdminRole(user.role);
-
-    // Admin users (and E2E face-bypass users) skip Stage 2 — issue a full access_token
-    // so admin / API flows work immediately without secondary face/passkey verification.
-    if (shouldBypassFaceForUser) {
-      const { token, jti, expiresAt } = signAccessToken(user, company);
-      await createUserSession({
-        user_id: user.id,
-        company_id: company.id,
-        jti,
-        expires_at: expiresAt,
-      });
-
-      return res.status(200).json({
-        success: true,
-        message: "Login successful",
-        token,
-        access_token: token,
-        pre_auth_token: null,
-        token_type: "access",
-        face_verification_bypassed: true,
-        user: {
-          username: user.username,
-          role: user.role,
-          company_id: company.id,
-          company_name: company.company_name,
-        },
-      });
-    }
-
-    // Stage 1 — short-lived pre_auth_token (no chat / protected API access).
-    const { token: preAuthToken, jti, expiresAt } = signPreAuthToken(user, company);
+    // Single-stage login: every successful username/password login issues a
+    // fully-authorized Stage-2 access token (isFaceVerified: true) valid for all
+    // protected endpoints including /api/chat. No secondary FaceID / biometric
+    // verification is required at login or on subsequent protected requests.
+    const { token, jti, expiresAt } = signAccessToken(user, company);
     await createUserSession({
       user_id: user.id,
       company_id: company.id,
@@ -1219,12 +1181,11 @@ async function loginHandler(req, res) {
     return res.status(200).json({
       success: true,
       message: "Login successful",
-      token: preAuthToken,
-      pre_auth_token: preAuthToken,
-      access_token: null,
-      token_type: "pre_auth",
-      step: "FACE_ID_REQUIRED",
-      face_verification_bypassed: false,
+      token,
+      access_token: token,
+      pre_auth_token: null,
+      token_type: "access",
+      face_verification_bypassed: true,
       user: {
         username: user.username,
         role: user.role,
