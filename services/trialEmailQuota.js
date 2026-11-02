@@ -9,11 +9,26 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function getNextMidnight(nowMs) {
+  const next = new Date(nowMs);
+  next.setHours(24, 0, 0, 0);
+  return next;
+}
+
 function applyWindowResetIfNeeded(user, nowMs) {
+  const now = new Date(nowMs);
   const resetAt = Date.parse(String(user.queries_reset_at || ""));
-  if (!Number.isFinite(resetAt) || nowMs - resetAt >= TRIAL_WINDOW_MS) {
+  let shouldReset = true;
+  if (Number.isFinite(resetAt)) {
+    const resetDate = new Date(resetAt);
+    shouldReset =
+      now.getFullYear() !== resetDate.getFullYear() ||
+      now.getMonth() !== resetDate.getMonth() ||
+      now.getDate() !== resetDate.getDate();
+  }
+  if (shouldReset) {
     user.queries_used = 0;
-    user.queries_reset_at = new Date(nowMs);
+    user.queries_reset_at = now;
   }
 }
 
@@ -36,6 +51,18 @@ async function getOrCreateTrialUser(email) {
 
   const user = { ...doc };
   applyWindowResetIfNeeded(user, Date.now());
+  if (user.queries_used !== doc.queries_used || user.queries_reset_at !== doc.queries_reset_at) {
+    await EmailTrialUser.updateOne(
+      { email: normalized },
+      {
+        $set: {
+          queries_used: user.queries_used,
+          queries_reset_at: user.queries_reset_at,
+          updated_at: nowIso(),
+        },
+      }
+    );
+  }
   return user;
 }
 
@@ -54,7 +81,7 @@ async function getQuota(email) {
       max_storage_bytes: TRIAL_MAX_STORAGE_BYTES,
       storage_remaining_bytes: TRIAL_MAX_STORAGE_BYTES,
       queries_reset_at: nowIso(),
-      window_reset_at: new Date(nowMs + TRIAL_WINDOW_MS).toISOString(),
+      window_reset_at: getNextMidnight(nowMs).toISOString(),
       company_id: buildTrialCompanyId(normalized),
     };
   }
@@ -88,7 +115,7 @@ async function getQuota(email) {
     max_storage_bytes: TRIAL_MAX_STORAGE_BYTES,
     storage_remaining_bytes: Math.max(0, TRIAL_MAX_STORAGE_BYTES - storageUsed),
     queries_reset_at: user.queries_reset_at ? new Date(resetAtMs).toISOString() : nowIso(),
-    window_reset_at: new Date(resetAtMs + TRIAL_WINDOW_MS).toISOString(),
+    window_reset_at: getNextMidnight(resetAtMs).toISOString(),
     company_id: buildTrialCompanyId(normalized),
   };
 }
@@ -107,8 +134,7 @@ async function checkQueryAllowed(email) {
 
   const queriesUsed = Math.max(0, Number(user.queries_used) || 0);
   if (queriesUsed >= TRIAL_QUERIES_LIMIT) {
-    const resetAtMs = Date.parse(String(user.queries_reset_at || ""));
-    const retryAfterMs = Math.max(0, resetAtMs + TRIAL_WINDOW_MS - nowMs);
+    const retryAfterMs = Math.max(0, getNextMidnight(nowMs).getTime() - nowMs);
     return { allowed: false, remaining: 0, retryAfterMs };
   }
 
